@@ -1,2 +1,42 @@
-# JetKVM
-JetKVM 中国供应链版 （官网 www.jetkvm.cn ）是一款高性价比、开源的 IP-KVM 远程管控设备，采用全国产化供应链元器件打造，专为国内用户优化，可稳定实现电脑 / 服务器远程管理。 JetKVM (China Supply Chain Edition) is a cost-effective, open-source KVM-over-IP device engineered for reliable remote computer/server management, built with fully localized Chinese supply chain components and optimized for domestic users.    
+
+[English](./README_EN.md)
+# JetKVM 中文社区版
+JetKVM 中文社区(中国供应链)版 是一款轻量级 是一款高性价比、开源的 IP-KVM 远程管控设备，采用全国产化供应链元器件打造，专为国内用户优化，可稳定实现电脑 / 服务器远程管理,支持通过网络远程获取目标设备画面并模拟 HID 输入，实现对开发板、电脑及服务器等系统的无接触运维管理。该产品具备稳定、低延迟的视频采集和远程控制能力，广泛适用于远程电脑控制和服务器维护等场景。基于 jetkvm/kvm 国际版深度二次开发。
+
+# 官网 
+[JetKVM中文社区官网](https://www.jetkvm.cn/)
+## 特性
+* **Micro SD 卡支持**:可用于软件启动设置或存储拓展
+* **USB 多功能配置**:支持模拟 USB 声卡或 MTP 设备，在 MTP 共享目录下可通过 HTTP 上传或下载文件 
+* **串口控制**:可连接受控设备的串口，实现对受控设备的串口控制和调试
+* **IO 电平配置**:控制拓展 IO 输出高低电平
+* **多种远程访问方案**:使用 WebRTC 通过异地组网（taiscale、xedge)或 FRP 端口反向代理进行远程管理
+
+## 核心特点
+* **超低延迟：采用高效 H.264 编码，支持 1080p@60fps 高清画面，延迟仅 30–60 毫秒，键鼠操控近乎本地无感。
+* **浏览器直连：无需安装任何软件与驱动，任意浏览器即可远程操作，支持 BIOS 底层管理、系统重装、故障恢复。
+* **虚拟媒体功能：可远程挂载 ISO 镜像，方便系统部署与设备排障。
+* **开源可定制：基于 Buildroot Linux 系统、Go 语言后端，固件完全开源，支持 SSH 深度自定义。
+* **国产硬件适配：搭载瑞芯微 RV1106G3 主控，标配 256MB DDR3L 内存、16GB eMMC 存储，USB-C、HDMI IN，串口、百兆网口。
+* **小巧耐用： 外置接电源，支持 7×24 小时不间断运行，适用于家庭实验室、办公机房、服务器机房场景。
+
+## 适用人群
+* **适合 IT 运维人员、极客玩家、远程技术工程师，追求高性价比、高性能远程 KVM，且需要稳定国内供货与售后支持的用户。
+
+## 编译
+* 仅编译前端
+    ```bash
+    make frontend
+    ```
+* 仅编译后端
+    ```bash
+    make build_dev
+    ```
+* 完整编译
+    ```bash
+    make build_release
+    ```
+* 编译生成 **bin/kvm_app**，通过 ssh 或 MTP 将文件上传到 JetKVM，替换 **/userdata/picokvm/bin/kvm_app**
+
+## 详细使用说明
+[JetKVM 教程](https://www.jetkvm.cn/category/%e6%95%99%e7%a8%8b/)
