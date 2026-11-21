@@ -21,7 +21,7 @@ import (
 
 var cliRootCmd = &cobra.Command{
 	Use:           "kvm_app cli",
-	Short:         "PicoKVM CLI tools",
+	Short:         "JetKVM CLI tools",
 	Long:          `Command line interface for controlling HID devices via API`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -132,7 +132,7 @@ func apiGetJSON(path string) (map[string]interface{}, error) {
 }
 
 func ShowHelp() {
-	fmt.Println(`PicoKVM - Remote KVM over IP
+	fmt.Println(`JetKVM.cn - Remote KVM over IP
 
 Usage:
   kvm_app                    Start the main web service (default)

@@ -1155,9 +1155,9 @@ func rpcFormatSDStorage(confirm bool, fsType string) error {
 
 	var mkfsCmd *exec.Cmd
 	if fsType == "exfat" {
-		mkfsCmd = exec.Command("mkfs.exfat", "-n", "PICOKVM", "/dev/mmcblk1p1")
+		mkfsCmd = exec.Command("mkfs.exfat", "-n", "JETKVM", "/dev/mmcblk1p1")
 	} else {
-		mkfsCmd = exec.Command("mkfs.vfat", "-F", "32", "-n", "PICOKVM", "/dev/mmcblk1p1")
+		mkfsCmd = exec.Command("mkfs.vfat", "-F", "32", "-n", "JETKVM", "/dev/mmcblk1p1")
 	}
 	mkfsOut, mkfsErr := mkfsCmd.CombinedOutput()
 	if mkfsErr != nil {

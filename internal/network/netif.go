@@ -62,7 +62,7 @@ func NewNetworkInterfaceState(opts *NetworkInterfaceOptions) (*NetworkInterfaceS
 	}
 
 	if opts.DefaultHostname == "" {
-		opts.DefaultHostname = "picokvm"
+		opts.DefaultHostname = "jetkvm"
 	}
 
 	err := confparser.SetDefaultsAndValidate(opts.NetworkConfig)

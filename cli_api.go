@@ -310,7 +310,7 @@ func handleAPIStatus(c *gin.Context) {
 			"error":  state.Error,
 		},
 		"device": gin.H{
-			"name":    "PicoKVM",
+			"name":    "JetKVM",
 			"version": builtAppVersion,
 		},
 	})

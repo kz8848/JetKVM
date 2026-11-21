@@ -299,19 +299,19 @@ func appendDefaultPolicies(base FirewallBaseRule) error {
 	}
 
 	if inputDefault != "disabled" {
-		if err := iptables("filter", "-A", firewallChainInput, "-j", inputDefault, "-m", "comment", "--comment", "picokvm-firewall-default-policy"); err != nil {
+		if err := iptables("filter", "-A", firewallChainInput, "-j", inputDefault, "-m", "comment", "--comment", "kvm-firewall-default-policy"); err != nil {
 			return err
 		}
 	} else {
 	}
 	if outputDefault != "disabled" {
-		if err := iptables("filter", "-A", firewallChainOutput, "-j", outputDefault, "-m", "comment", "--comment", "picokvm-firewall-default-policy"); err != nil {
+		if err := iptables("filter", "-A", firewallChainOutput, "-j", outputDefault, "-m", "comment", "--comment", "kvm-firewall-default-policy"); err != nil {
 			return err
 		}
 	} else {
 	}
 	if forwardDefault != "disabled" {
-		if err := iptables("filter", "-A", firewallChainForward, "-j", forwardDefault, "-m", "comment", "--comment", "picokvm-firewall-default-policy"); err != nil {
+		if err := iptables("filter", "-A", firewallChainForward, "-j", forwardDefault, "-m", "comment", "--comment", "kvm-firewall-default-policy"); err != nil {
 			return err
 		}
 	} else {
@@ -833,21 +833,21 @@ func ReadFirewallConfigFromSystem() (*FirewallConfig, error) {
 	// Detect if default policies are disabled by checking for our comment
 	inputHasComment := false
 	for _, r := range inputRules {
-		if r.comment == "picokvm-firewall-default-policy" {
+		if r.comment == "kvm-firewall-default-policy" {
 			inputHasComment = true
 			break
 		}
 	}
 	outputHasComment := false
 	for _, r := range outputRules {
-		if r.comment == "picokvm-firewall-default-policy" {
+		if r.comment == "kvm-firewall-default-policy" {
 			outputHasComment = true
 			break
 		}
 	}
 	forwardHasComment := false
 	for _, r := range forwardRules {
-		if r.comment == "picokvm-firewall-default-policy" {
+		if r.comment == "kvm-firewall-default-policy" {
 			forwardHasComment = true
 			break
 		}
@@ -1054,7 +1054,7 @@ func isUnconditionalDefaultRule(r iptablesParsedRule) bool {
 		return false
 	}
 	// Check if this is our marked default policy rule
-	if r.comment == "picokvm-firewall-default-policy" {
+	if r.comment == "kvm-firewall-default-policy" {
 		return true
 	}
 	// Check if source or destination are set to specific values (not "any" or "0.0.0.0/0")

@@ -53,13 +53,13 @@ func GetDeviceID() string {
 }
 
 func GetDefaultHostname() string {
-	//deviceId := GetDeviceID()
-	//if deviceId == "unknown_device_id" {
-	//	return "kvm"
-	//}
+	deviceId := GetDeviceID()
+	if deviceId == "unknown_device_id" {
+		return "jetkvm"
+	}
 
-	//return fmt.Sprintf("kvm-%s", strings.ToLower(deviceId))
-	return "picokvm"
+	return fmt.Sprintf("kvm-%s", strings.ToLower(deviceId))
+	//return "picokvm"
 }
 
 func GetHostname() string {

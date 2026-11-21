@@ -149,7 +149,7 @@ export function ConnectionFailedOverlay({
 
                         <li>
                           {$at("Make sure the ")}
-                          <span className="text-[red]">{$at("PicoKVM ")}</span>
+                          <span className="text-[red]">{$at("JetKVM ")}</span>
                           {$at("is powered on and properly connected")}
 
                         </li>
@@ -158,12 +158,12 @@ export function ConnectionFailedOverlay({
 
                         <li>
                           {$at("Verify that ")}
-                          <span className="text-[red]">{$at("PicoKVM's ")}</span>
+                          <span className="text-[red]">{$at("JetKVM's ")}</span>
                           {$at("network connection is active and stable")}
                         </li>
                         <li>
                           {$at("Try restarting both the ")}
-                          <span className="text-[red]">{$at("PicoKVM ")}</span>
+                          <span className="text-[red]">{$at("JetKVM ")}</span>
                           {$at("and your computer")}
                         </li>
                       </ul>
@@ -332,7 +332,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
                         <ul className="list-disc space-y-2 pl-4 text-left">
                           <li>
                             {$at("Make sure the HDMI cable is securely connected between the ")}
-                            <span className="text-[red]">{$at("PicoKVM ")}</span>
+                            <span className="text-[red]">{$at("JetKVM ")}</span>
                             {$at("and ")}
                             <span className="text-[red]">{$at("source device")}</span>
                           </li>

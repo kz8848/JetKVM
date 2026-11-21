@@ -264,7 +264,7 @@ func PublishEnabled(value bool) {
 // has a key, and is closed again when either goes away. Stdio mode blocks on the
 // transport because there is no listener to reconcile.
 func Start(port int, stdio bool) {
-	s := server.NewMCPServer("picokvm-mcp", "1.0.0")
+	s := server.NewMCPServer("jetkvm-mcp", "1.0.0")
 	registerTools(s)
 
 	if stdio {
