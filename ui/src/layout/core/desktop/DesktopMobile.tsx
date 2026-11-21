@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
-import { BsMouseFill, BsLockFill, BsUnlockFill } from "react-icons/bs";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useReactAt } from "i18n-auto-extractor/react";
 
 import VirtualKeyboard from "@components/VirtualKeyboard";
@@ -16,29 +15,33 @@ import { usePointerLock } from "@/layout/core/desktop/hooks/usePointerLock";
 import { useFullscreen } from "@/layout/core/desktop/hooks/useFullscreen";
 import { useKeyboardEvents } from "@/layout/core/desktop/hooks/useKeyboardEvents";
 import { useMouseEvents } from "@/layout/core/desktop/hooks/useMouseEvents";
+import { usesAbsolutePosition } from "@/hooks/mouseMode";
 import { useVideoOverlays } from "@/layout/core/desktop/hooks/useVideoOverlays";
 import { VideoContainer } from "@components/Video/VideoContainer";
 import { VideoElement } from "@components/Video/VideoElement";
 import StatsTobbar from "@components/Sidebar/StatsTopbar";
-import KeyboardPanel from "@/layout/components_bottom/keyboard/KeyboardPanel";
+import KeyboardSide from "@/layout/components_side/Keyboard/KeyboardSide";
 import Clipboard from "@/layout/components_side/Clipboard/Clipboard";
 import SettingsModal from "@/layout/components_setting";
 import  { MacroMoreList } from "@/layout/components_side/Macros/MacroTopBar";
-import { useMacrosSideTitleState , useHidStore, useMouseStore, useSettingsStore } from "@/hooks/stores";
+import { useMacrosSideTitleState , useHidStore, useMouseStore, useSettingsStore, useUiStore } from "@/hooks/stores";
 import MobileTerminal from "@/layout/components_bottom/terminal/index.mobile";
 import { dark_bg_desktop, dark_bg_style_fun } from "@/layout/theme_color";
 import PowerControl from "@/layout/components_side/Power";
-import MousePanel from "@components/MousePanel";
+import MouseSide from "@/layout/components_side/Mouse/MouseSide";
 import EnhancedDrawer from "@components/Sidebar/SidebarDrawer";
 import SettingsVideoSide from "@/layout/components_side/Video/SettingsVideoSide";
+import VirtualMouseOverlay from "@/layout/core/desktop/VirtualMouseOverlay";
 import ConnectionStatsSidebar from "@components/ConnectionStats";
 import { useTheme } from "@/layout/contexts/ThemeContext";
 import SettingsMacros from "@/layout/components_side/Macros";
 import { useTouchZoom } from "@/layout/core/desktop/hooks/useTouchZoom";
 import { usePasteHandler } from "@/layout/core/desktop/hooks/usePasteHandler";
 import UsbEpModeSelect from "@/layout/components_bottom/usbepmode/UsbEpModeSelect";
+import { RemoteStatusPanelConnected } from "@/layout/core/bar_bottom/RemoteStatusPanel";
+import { HdmiStatusPanelConnected } from "@/layout/core/bar_bottom/HdmiStatusPanel";
 import VirtualMediaSource from "@/layout/components_side/VirtualMediaSource";
-import { useJsonRpc } from "@/hooks/useJsonRpc";
+import OcrOverlay from "@components/OcrOverlay";
 
 export default function MobileDesktop({ isFullscreen }: { isFullscreen?: number }) {
   const { $at } = useReactAt();
@@ -49,112 +52,103 @@ export default function MobileDesktop({ isFullscreen }: { isFullscreen?: number 
   const zoomContainerRef = useRef<HTMLDivElement>(null);
   const pasteCaptureRef = useRef<HTMLTextAreaElement>(null);
   const isReinitializingGadget = useHidStore(state => state.isReinitializingGadget);
+  const isOcrMode = useUiStore(state => state.isOcrMode);
+  const mobileToolsHidden = useUiStore(state => state.mobileToolsHidden);
   const macrosSideTitle = useMacrosSideTitleState(state => state.sideTitle);
 
   const videoEffects = useVideoEffects();
   const videoStream = useVideoStream(videoElm as React.RefObject<HTMLVideoElement>, audioElm as React.RefObject<HTMLAudioElement>);
   const pointerLock = usePointerLock(videoElm as React.RefObject<HTMLVideoElement>);
   useFullscreen(videoElm as React.RefObject<HTMLVideoElement>, pointerLock, isFullscreen);
-  const touchZoom = useTouchZoom(zoomContainerRef as React.RefObject<HTMLDivElement>);
+  const isTouchGestureEnabled = useSettingsStore(state => state.touchGestureEnabled);
+  const setIsTouchGestureEnabled = useSettingsStore(state => state.setTouchGestureEnabled);
+
+  // Two-finger scroll ends up in the same wheel report the physical wheel uses.
+  // That report lives in useMouseEvents, which needs this hook's result first, so
+  // the two are joined through a ref instead of each depending on the other.
+  const touchScrollRef = useRef<(wheelY: number, wheelX: number) => void>(() => {});
+  const handleTouchScroll = useCallback((wheelY: number, wheelX: number) => {
+    touchScrollRef.current(wheelY, wheelX);
+  }, []);
+  const mouseMode = useSettingsStore(state => state.mouseMode);
+  const touchZoom = useTouchZoom(
+    zoomContainerRef as React.RefObject<HTMLDivElement>,
+    isTouchGestureEnabled,
+    handleTouchScroll,
+  );
   const { handleGlobalPaste } = usePasteHandler(pasteCaptureRef as React.RefObject<HTMLTextAreaElement>);
   const keyboardEvents = useKeyboardEvents(pasteCaptureRef as React.RefObject<HTMLTextAreaElement>, isReinitializingGadget);
-  const [showVirtualMouseButtons, setShowVirtualMouseButtons] = useState(false);
-  const [lockedButtons, setLockedButtons] = useState(0);
-  const mouseEvents = useMouseEvents(videoElm as React.RefObject<HTMLVideoElement>, pointerLock, touchZoom, showVirtualMouseButtons, lockedButtons);
+  const [virtualMouseActive, setVirtualMouseActive] = useState(false);
+  const mouseEvents = useMouseEvents(videoElm as React.RefObject<HTMLVideoElement>, pointerLock, touchZoom, virtualMouseActive, 0);
+  useEffect(() => {
+    touchScrollRef.current = mouseEvents.sendWheelReport;
+  }, [mouseEvents.sendWheelReport]);
   const overlays = useVideoOverlays(videoStream, pointerLock, videoEffects);
 
   const forceHttp = useSettingsStore(state => state.forceHttp);
+  const setMouseMode = useSettingsStore(state => state.setMouseMode);
   const mouseX = useMouseStore(state => state.mouseX);
   const mouseY = useMouseStore(state => state.mouseY);
-  const [send] = useJsonRpc();
-  const [leftBtnPos, setLeftBtnPos] = useState({ x: 40, y: 40 });
-  const [rightBtnPos, setRightBtnPos] = useState({ x: 120, y: 40 });
-  const [leftLockPos, setLeftLockPos] = useState({ x: 40, y: 110 });
-  const [rightLockPos, setRightLockPos] = useState({ x: 120, y: 110 });
-
-  const [draggingBtn, setDraggingBtn] = useState<"left" | "right" | "leftLock" | "rightLock" | null>(null);
-  const dragOffset = useRef({ x: 0, y: 0 });
-  
+  const allowTapToOpenVirtualKeyboard = useHidStore(state => state.allowTapToOpenVirtualKeyboard);
+  const setAllowTapToOpenVirtualKeyboard = useHidStore(state => state.setAllowTapToOpenVirtualKeyboard);
   const activeButtonsRef = useRef(0);
-  
+  // Absolute HID coordinates map 0..1 onto the whole screen, so a zero default
+  // would fling the host cursor into the top-left corner on the first button
+  // press. Start at the centre and only track real pointer positions.
+  const lastAbsPosRef = useRef({ x: 0.5, y: 0.5 });
+
   useEffect(() => {
-    if (isFullscreen) {
-      setShowVirtualMouseButtons(false);
+    if (usesAbsolutePosition(mouseMode)) {
+      // (0,0) is the store default and not a real pointer position.
+      if (mouseX === 0 && mouseY === 0) return;
+      lastAbsPosRef.current = { x: mouseX, y: mouseY };
     }
-  }, [isFullscreen]);
+  }, [mouseX, mouseY, mouseMode]);
 
   const updateButtons = (mask: number, isDown: boolean) => {
     if (isReinitializingGadget) return;
-    
+
     let newButtons = activeButtonsRef.current;
     if (isDown) {
-        newButtons |= mask;
+      newButtons |= mask;
     } else {
-        newButtons &= ~mask;
-    }
-    
-    if (!isDown && (lockedButtons & mask)) {
-        setLockedButtons(prev => prev & ~mask);
+      newButtons &= ~mask;
     }
 
     activeButtonsRef.current = newButtons;
-    send("absMouseReport", { x: mouseX, y: mouseY, buttons: newButtons });
-  };
-  
-  const toggleLock = (mask: number) => {
-     if (isReinitializingGadget) return;
-     const isLocked = (lockedButtons & mask) !== 0;
-     let newButtons = activeButtonsRef.current;
-     
-     if (isLocked) {
-         setLockedButtons(prev => prev & ~mask);
-         newButtons &= ~mask;
-     } else {
-         setLockedButtons(prev => prev | mask);
-         newButtons |= mask;
-     }
-     
-     activeButtonsRef.current = newButtons;
-     send("absMouseReport", { x: mouseX, y: mouseY, buttons: newButtons });
-  };
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>, type: "left" | "right" | "leftLock" | "rightLock") => {
-    const target = e.currentTarget;
-    const rect = target.getBoundingClientRect();
-    dragOffset.current = {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    };
-    setDraggingBtn(type);
-    target.setPointerCapture(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!draggingBtn) return;
-    const container = containerRef.current;
-    if (!container) return;
-    const containerRect = container.getBoundingClientRect();
-    const x = e.clientX - containerRect.left - dragOffset.current.x;
-    const y = e.clientY - containerRect.top - dragOffset.current.y;
-    const clampedX = Math.max(0, Math.min(containerRect.width - 56, x));
-    const clampedY = Math.max(0, Math.min(containerRect.height - 56, y));
-    if (draggingBtn === "left") {
-      setLeftBtnPos({ x: clampedX, y: clampedY });
-    } else if (draggingBtn === "right") {
-      setRightBtnPos({ x: clampedX, y: clampedY });
-    } else if (draggingBtn === "leftLock") {
-      setLeftLockPos({ x: clampedX, y: clampedY });
-    } else if (draggingBtn === "rightLock") {
-      setRightLockPos({ x: clampedX, y: clampedY });
+    if (mouseMode === "relative") {
+      mouseEvents.sendVirtualRelativeMovement(0, 0, newButtons);
+    } else {
+      mouseEvents.sendAbsMouseMovement(lastAbsPosRef.current.x, lastAbsPosRef.current.y, newButtons);
     }
   };
+  
+  // Every relative report carries the button mask, so the joystick has to send the
+  // mask that is currently held down: a zero mask reads as "button released" on
+  // the host and drops the drag (window move, rubber-band selection) mid-gesture.
+  const moveVirtualRelative = useCallback(
+    (dx: number, dy: number) => {
+      mouseEvents.sendVirtualRelativeMovement(dx, dy, activeButtonsRef.current);
+    },
+    [mouseEvents.sendVirtualRelativeMovement],
+  );
 
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>, type: "left" | "right" | "leftLock" | "rightLock") => {
-    const wasDragging = draggingBtn === type;
-    setDraggingBtn(null);
-    (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
-    if (!wasDragging) return;
-  };
+  // Joystick deltas are pixel based, but absolute modes must move the cursor
+  // through the same channel that button reports use: otherwise a button press
+  // would carry the stale coordinate and pull the cursor back.
+  const moveVirtualAbsolute = useCallback(
+    (dxNorm: number, dyNorm: number) => {
+      if (isReinitializingGadget) return;
+      const current = lastAbsPosRef.current;
+      const next = {
+        x: Math.min(1, Math.max(0, current.x + dxNorm)),
+        y: Math.min(1, Math.max(0, current.y + dyNorm)),
+      };
+      lastAbsPosRef.current = next;
+      mouseEvents.sendAbsMouseMovement(next.x, next.y, activeButtonsRef.current);
+    },
+    [isReinitializingGadget, mouseEvents.sendAbsMouseMovement],
+  );
 
   useEffect(() => {
     const keyboardCleanup = keyboardEvents.setupKeyboardEvents();
@@ -166,7 +160,7 @@ export default function MobileDesktop({ isFullscreen }: { isFullscreen?: number 
       videoCleanup?.();
       mouseCleanup?.();
     };
-  }, [keyboardEvents, videoStream, mouseEvents]);
+  }, [keyboardEvents.setupKeyboardEvents, videoStream.setupVideoEventListeners, mouseEvents.setupMouseEvents]);
 
   return (
     <div className=" h-full w-full flex flex-col justify-evenly overflow-hidden  bg-[#d3d3d3] dark:bg-[#1a1a1a]">
@@ -196,22 +190,37 @@ export default function MobileDesktop({ isFullscreen }: { isFullscreen?: number 
       />
 
       <EnhancedDrawer
+        title={$at("Keyboard")}
         targetView={"KeyboardPanel"}
-        className={""}
+        className={"p-[20px]"}
         placement={"bottom"}
-        drawerRender={() => (<KeyboardPanel/>)}
+        drawerRender={() => (<KeyboardSide/>)}
       />
       <EnhancedDrawer
+        title={$at("Mouse")}
         targetView={"MousePanel"}
-        className={""}
+        className={"p-[20px]"}
         placement={"bottom"}
-        drawerRender={() => (<MousePanel/>)}
+        drawerRender={() => (<MouseSide/>)}
       />
       <EnhancedDrawer
+        title={$at("USB")}
         targetView={"UsbEpModeSelect"}
         placement={"bottom"}
         drawerRender={() => (<UsbEpModeSelect/>)}
-        className={"px-[20px]"}
+      />
+      <EnhancedDrawer
+        title={$at("HDMI")}
+        targetView={"HdmiStatus"}
+        placement={"bottom"}
+        drawerRender={() => (<HdmiStatusPanelConnected/>)}
+      />
+
+      <EnhancedDrawer
+        title={$at("Remote Access")}
+        targetView={"RemoteStatus"}
+        placement={"bottom"}
+        drawerRender={() => (<RemoteStatusPanelConnected/>)}
       />
 
       <EnhancedDrawer
@@ -267,12 +276,17 @@ export default function MobileDesktop({ isFullscreen }: { isFullscreen?: number 
                           `h-full  w-full  ${dark_bg_style_fun(isDark)} object-contain transition-all duration-1000`,
                           {
                             "cursor-none": videoEffects.settings.isCursorHidden,
+                            "pointer-events-none": isOcrMode,
                             "opacity-0": overlays.shouldHideVideo,
                             "opacity-60!": overlays.showPointerLockBar,
                             "animate-slideUpFade  dark:border-slate-300/20":
                             videoStream.isPlaying,
                           },
                         )}
+                      />
+                      <OcrOverlay
+                        videoRef={videoElm as React.RefObject<HTMLVideoElement>}
+                        containerRef={zoomContainerRef as React.RefObject<HTMLDivElement>}
                       />
 
                     {(videoStream.peerConnectionState === "connected" || forceHttp) && (
@@ -292,111 +306,25 @@ export default function MobileDesktop({ isFullscreen }: { isFullscreen?: number 
                       </div>
                     )}
                   </div>
-                  <div
-                    className="pointer-events-none absolute inset-0"
-                    onPointerMove={handlePointerMove}
-                  >
-                    <div
-                      className={cx(
-                        "pointer-events-auto absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full text-white text-xs",
-                        isDark ? "bg-gray-500/70" : "bg-black/30",
-                      )}
-                      style={{
-                        touchAction: "none",
-                      }}
-                      onClick={() => setShowVirtualMouseButtons(prev => !prev)}
-                    >
-                      <BsMouseFill className="h-4 w-4" />
-                    </div>
-                    {showVirtualMouseButtons && (
-                      <>
-                        <div
-                          className={cx(
-                            "pointer-events-auto absolute flex h-14 w-14 items-center justify-center rounded-full text-white text-xs active:scale-90 transition-transform duration-100",
-                            isDark ? "bg-gray-500/70" : "bg-black/30",
-                          )}
-                          style={{
-                            left: leftBtnPos.x,
-                            top: leftBtnPos.y,
-                            touchAction: "none",
-                          }}
-                          onPointerDown={e => {
-                            handlePointerDown(e, "left");
-                            updateButtons(1, true);
-                          }}
-                          onPointerUp={e => {
-                            handlePointerUp(e, "left");
-                            updateButtons(1, false);
-                          }}
-                        >
-                          L
-                        </div>
-
-                        <div
-                          className={cx(
-                            "pointer-events-auto absolute flex h-14 w-14 items-center justify-center rounded-full text-white text-xs active:scale-90 transition-transform duration-100",
-                            (lockedButtons & 1) ? "bg-green-600/80" : (isDark ? "bg-gray-500/70" : "bg-black/30"),
-                          )}
-                          style={{
-                            left: leftLockPos.x,
-                            top: leftLockPos.y,
-                            touchAction: "none",
-                          }}
-                          onPointerDown={e => {
-                            handlePointerDown(e, "leftLock");
-                          }}
-                          onPointerUp={e => {
-                            handlePointerUp(e, "leftLock");
-                          }}
-                          onClick={() => toggleLock(1)}
-                        >
-                          {(lockedButtons & 1) ? <BsLockFill /> : <BsUnlockFill />} L
-                        </div>
-
-                        <div
-                          className={cx(
-                            "pointer-events-auto absolute flex h-14 w-14 items-center justify-center rounded-full text-white text-xs active:scale-90 transition-transform duration-100",
-                            isDark ? "bg-gray-500/70" : "bg-black/30",
-                          )}
-                          style={{
-                            left: rightBtnPos.x,
-                            top: rightBtnPos.y,
-                            touchAction: "none",
-                          }}
-                          onPointerDown={e => {
-                            handlePointerDown(e, "right");
-                            updateButtons(2, true);
-                          }}
-                          onPointerUp={e => {
-                            handlePointerUp(e, "right");
-                            updateButtons(2, false);
-                          }}
-                        >
-                          R
-                        </div>
-
-                        <div
-                          className={cx(
-                            "pointer-events-auto absolute flex h-14 w-14 items-center justify-center rounded-full text-white text-xs active:scale-90 transition-transform duration-100",
-                            (lockedButtons & 2) ? "bg-green-600/80" : (isDark ? "bg-gray-500/70" : "bg-black/30"),
-                          )}
-                          style={{
-                            left: rightLockPos.x,
-                            top: rightLockPos.y,
-                            touchAction: "none",
-                          }}
-                          onPointerDown={e => {
-                            handlePointerDown(e, "rightLock");
-                          }}
-                          onPointerUp={e => {
-                            handlePointerUp(e, "rightLock");
-                          }}
-                          onClick={() => toggleLock(2)}
-                        >
-                          {(lockedButtons & 2) ? <BsLockFill /> : <BsUnlockFill />} R
-                        </div>
-                      </>
-                    )}
+                  <div className="pointer-events-none absolute inset-0">
+                    <VirtualMouseOverlay
+                      isDark={isDark}
+                      toolsHidden={mobileToolsHidden}
+                      disabled={isReinitializingGadget}
+                      isTouchGestureEnabled={isTouchGestureEnabled}
+                      onToggleTouchGesture={() => setIsTouchGestureEnabled(!isTouchGestureEnabled)}
+                      onResetView={() => touchZoom.resetTransform()}
+                      virtualKeyboardEnabled={allowTapToOpenVirtualKeyboard}
+                      onToggleVirtualKeyboard={() => setAllowTapToOpenVirtualKeyboard(!allowTapToOpenVirtualKeyboard)}
+                      onPressButtons={mask => updateButtons(mask, true)}
+                      onReleaseButtons={mask => updateButtons(mask, false)}
+                      mouseToolsAllowed={mouseMode === "relative"}
+                      onSetMouseMode={setMouseMode}
+                      onRelativeMove={moveVirtualRelative}
+                      onMoveAbsolute={usesAbsolutePosition(mouseMode) ? moveVirtualAbsolute : undefined}
+                      onWheel={delta => mouseEvents.sendWheelReport(delta, 0)}
+                      onActiveChange={setVirtualMouseActive}
+                    />
                   </div>
                 </div>
                 <VirtualKeyboard />

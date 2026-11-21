@@ -19,6 +19,11 @@ type IPv6Address struct {
 	Scope             int        `json:"scope"`
 }
 
+type TimeSyncCustomServer struct {
+	Server  string `json:"server" required:"true"`
+	Enabled bool   `json:"enabled" default:"true"`
+}
+
 type IPv4StaticConfig struct {
 	Address null.String `json:"address,omitempty" validate_type:"ipv4" required:"true"`
 	Netmask null.String `json:"netmask,omitempty" validate_type:"ipv4" required:"true"`
@@ -33,24 +38,31 @@ type IPv6StaticConfig struct {
 	DNS     []string    `json:"dns,omitempty" validate_type:"ipv6" required:"true"`
 }
 type NetworkConfig struct {
-    Hostname null.String `json:"hostname,omitempty" validate_type:"hostname"`
-    Domain   null.String `json:"domain,omitempty" validate_type:"hostname"`
+	Hostname   null.String `json:"hostname,omitempty" validate_type:"hostname"`
+	Domain     null.String `json:"domain,omitempty" validate_type:"hostname"`
+	HTTPProxy  null.String `json:"http_proxy,omitempty"`
+	HTTPSProxy null.String `json:"https_proxy,omitempty"`
+	ALLProxy   null.String `json:"all_proxy,omitempty"`
 
-    IPv4Mode           null.String       `json:"ipv4_mode,omitempty" one_of:"dhcp,static,disabled" default:"dhcp"`
-    IPv4RequestAddress null.String       `json:"ipv4_request_address,omitempty"`
-    IPv4Static         *IPv4StaticConfig `json:"ipv4_static,omitempty" required_if:"IPv4Mode=static"`
+	IPv4Mode           null.String       `json:"ipv4_mode,omitempty" one_of:"dhcp,static,disabled" default:"dhcp"`
+	IPv4RequestAddress null.String       `json:"ipv4_request_address,omitempty"`
+	IPv4Static         *IPv4StaticConfig `json:"ipv4_static,omitempty" required_if:"IPv4Mode=static"`
 
-    IPv6Mode   null.String       `json:"ipv6_mode,omitempty" one_of:"slaac,dhcpv6,slaac_and_dhcpv6,static,link_local,disabled" default:"slaac"`
-    IPv6Static *IPv6StaticConfig `json:"ipv6_static,omitempty" required_if:"IPv6Mode=static"`
+	IPv6Mode   null.String       `json:"ipv6_mode,omitempty" one_of:"slaac,dhcpv6,slaac_and_dhcpv6,static,link_local,disabled" default:"slaac"`
+	IPv6Static *IPv6StaticConfig `json:"ipv6_static,omitempty" required_if:"IPv6Mode=static"`
 
-    LLDPMode                null.String `json:"lldp_mode,omitempty" one_of:"disabled,basic,all" default:"basic"`
-    LLDPTxTLVs              []string    `json:"lldp_tx_tlvs,omitempty" one_of:"chassis,port,system,vlan" default:"chassis,port,system,vlan"`
-    MDNSMode                null.String `json:"mdns_mode,omitempty" one_of:"disabled,auto,ipv4_only,ipv6_only" default:"auto"`
-    TimeSyncMode            null.String `json:"time_sync_mode,omitempty" one_of:"ntp_only,ntp_and_http,http_only,custom" default:"ntp_and_http"`
-    TimeSyncOrdering        []string    `json:"time_sync_ordering,omitempty" one_of:"http,ntp,ntp_dhcp,ntp_user_provided,ntp_fallback" default:"ntp,http"`
-    TimeSyncDisableFallback null.Bool   `json:"time_sync_disable_fallback,omitempty" default:"false"`
-    TimeSyncParallel        null.Int    `json:"time_sync_parallel,omitempty" default:"4"`
-    PendingReboot           null.Bool   `json:"pending_reboot,omitempty" default:"false"`
+	LLDPMode                null.String `json:"lldp_mode,omitempty" one_of:"disabled,basic,all" default:"basic"`
+	LLDPTxTLVs              []string    `json:"lldp_tx_tlvs,omitempty" one_of:"chassis,port,system,vlan" default:"chassis,port,system,vlan"`
+	MDNSMode                null.String `json:"mdns_mode,omitempty" one_of:"disabled,auto,ipv4_only,ipv6_only" default:"auto"`
+	TimeSyncMode            null.String `json:"time_sync_mode,omitempty" one_of:"ntp_only,ntp_and_http,http_only,disabled,custom" default:"ntp_and_http"`
+	TimeSyncNtpServers      []string    `json:"time_sync_ntp_servers"` // nil = use all built-in servers, empty = use none
+	TimeSyncHttpUrls        []string    `json:"time_sync_http_urls"`   // nil = use all built-in URLs, empty = use none
+	TimeSyncNtpCustom       []TimeSyncCustomServer `json:"time_sync_ntp_custom,omitempty"`
+	TimeSyncHttpCustom      []TimeSyncCustomServer `json:"time_sync_http_custom,omitempty"`
+	TimeSyncOrdering        []string    `json:"time_sync_ordering,omitempty" one_of:"http,ntp,ntp_dhcp,ntp_user_provided,ntp_fallback" default:"ntp,http"`
+	TimeSyncDisableFallback null.Bool   `json:"time_sync_disable_fallback,omitempty" default:"false"`
+	TimeSyncParallel        null.Int    `json:"time_sync_parallel,omitempty" default:"4"`
+	PendingReboot           null.Bool   `json:"pending_reboot,omitempty" default:"false"`
 }
 
 func (c *NetworkConfig) GetMDNSMode() *mdns.MDNSListenOptions {

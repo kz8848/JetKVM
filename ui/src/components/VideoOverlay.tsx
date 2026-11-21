@@ -13,6 +13,7 @@ import { isMobile } from "react-device-detect";
 
 import notifications from "@/notifications";
 import { useJsonRpc } from "@/hooks/useJsonRpc";
+import { isKeyboardTapSuppressed } from "@/utils/keyboardTapGuard";
 import Card, { GridCard } from "@components/Card";
 import LoadingSpinner from "@components/LoadingSpinner";
 import { Button } from "@components/Button";
@@ -84,7 +85,7 @@ export function LoadingConnectionOverlay({ show, text }: LoadingConnectionOverla
     <AnimatePresence>
       {show && (
         <motion.div
-          className="aspect-video h-full w-full"
+          className="absolute inset-0 h-full w-full"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0, transition: { duration: 0 } }}
@@ -124,7 +125,7 @@ export function ConnectionFailedOverlay({
     <AnimatePresence>
       {show && (
         <motion.div
-          className="aspect-video h-full w-full"
+          className="absolute inset-0 h-full w-full"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0, transition: { duration: 0 } }}
@@ -148,7 +149,7 @@ export function ConnectionFailedOverlay({
 
                         <li>
                           {$at("Make sure the ")}
-                          <span className="text-[red]">{$at("JetKVM ")}</span>
+                          <span className="text-[red]">{$at("PicoKVM ")}</span>
                           {$at("is powered on and properly connected")}
 
                         </li>
@@ -157,12 +158,12 @@ export function ConnectionFailedOverlay({
 
                         <li>
                           {$at("Verify that ")}
-                          <span className="text-[red]">{$at("JetKVM's ")}</span>
+                          <span className="text-[red]">{$at("PicoKVM's ")}</span>
                           {$at("network connection is active and stable")}
                         </li>
                         <li>
                           {$at("Try restarting both the ")}
-                          <span className="text-[red]">{$at("JetKVM ")}</span>
+                          <span className="text-[red]">{$at("PicoKVM ")}</span>
                           {$at("and your computer")}
                         </li>
                       </ul>
@@ -182,7 +183,7 @@ export function ConnectionFailedOverlay({
 
                     {isMobile && <div className="w-full h-[10px]"></div>}
                     <AntdButton
-                      href={"https://www.jetkvm.cn/"}
+                      href={"https://wiki.luckfox.com/intro"}
                       icon={<TiaoZhuanSvg />}
                       iconPosition={"end"}
                       onClick={() => setupPeerConnection()}
@@ -215,7 +216,7 @@ export function PeerConnectionDisconnectedOverlay({
     <AnimatePresence>
       {show && (
         <motion.div
-          className="aspect-video h-full w-full"
+          className="absolute inset-0 h-full w-full"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0, transition: { duration: 0 } }}
@@ -278,9 +279,11 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
 
   const setVirtualKeyboardEnabled = useHidStore(state => state.setVirtualKeyboardEnabled);
   const isVirtualKeyboardEnabled = useHidStore(state => state.isVirtualKeyboardEnabled);
+  const allowTapToOpenVirtualKeyboard = useHidStore(state => state.allowTapToOpenVirtualKeyboard);
 
   const handleClick = () => {
-    if (isMobile && !isVirtualKeyboardEnabled) {
+    if (isKeyboardTapSuppressed()) return;
+    if (isMobile && allowTapToOpenVirtualKeyboard && !isVirtualKeyboardEnabled) {
       setVirtualKeyboardEnabled(true);
     }
   };
@@ -301,7 +304,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
       <AnimatePresence>
         {show && isNoSignal && (
           <motion.div
-            className="absolute inset-0 aspect-video h-full w-full "
+            className="absolute inset-0 h-full w-full "
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -329,7 +332,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
                         <ul className="list-disc space-y-2 pl-4 text-left">
                           <li>
                             {$at("Make sure the HDMI cable is securely connected between the ")}
-                            <span className="text-[red]">{$at("JetKVM ")}</span>
+                            <span className="text-[red]">{$at("PicoKVM ")}</span>
                             {$at("and ")}
                             <span className="text-[red]">{$at("source device")}</span>
                           </li>
@@ -366,7 +369,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
                       {isMobile&&<div className="w-full h-[10px]"></div>}
 
                       <AntdButton
-                        href={"https://www.jetkvm.cn"}
+                        href={"https://wiki.luckfox.com/intro"}
                         iconPosition={"end"}
                         icon={<TiaoZhuanSvg />}
                         className={isMobile?"w-full !h-[40px]":"w-[49%]"}
@@ -385,7 +388,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
       <AnimatePresence>
         {show && isOtherError && (
           <motion.div
-            className="absolute inset-0 aspect-video h-full w-full"
+            className="absolute inset-0 h-full w-full"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -412,7 +415,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
                     </div>
                     <div className={`flex  w-full justify-center ${isMobile ? "flex-col h-[40px]" : "flex-row"}`}>
                       <AntdButton
-                        href={"https://www.jetkvm.cn"}
+                        href={"https://wiki.luckfox.com/intro"}
                         icon={<TiaoZhuanSvg />}
                         iconPosition={"end"}
                         className={isMobile ? "w-full !h-[40px]" : "w-[49%]"}
@@ -445,7 +448,7 @@ export function NoAutoplayPermissionsOverlay({
     <AnimatePresence>
       {show && (
         <motion.div
-          className="absolute inset-0 z-10 aspect-video h-full w-full"
+          className="absolute inset-0 z-10 h-full w-full"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

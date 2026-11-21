@@ -2,8 +2,11 @@ package kvm
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"kvm/internal/network"
+	"kvm/internal/timesync"
 	"kvm/internal/udhcpc"
 
 	"github.com/guregu/null/v6"
@@ -16,6 +19,27 @@ const (
 var (
 	networkState *network.NetworkInterfaceState
 )
+
+func setProxyEnvVar(key, value string) {
+	value = strings.TrimSpace(value)
+	upperKey := strings.ToUpper(key)
+	if value == "" {
+		_ = os.Unsetenv(key)
+		_ = os.Unsetenv(upperKey)
+		return
+	}
+	_ = os.Setenv(key, value)
+	_ = os.Setenv(upperKey, value)
+}
+
+func applyProxyEnvironment(networkConfig *network.NetworkConfig) {
+	if networkConfig == nil {
+		return
+	}
+	setProxyEnvVar("http_proxy", networkConfig.HTTPProxy.String)
+	setProxyEnvVar("https_proxy", networkConfig.HTTPSProxy.String)
+	setProxyEnvVar("all_proxy", networkConfig.ALLProxy.String)
+}
 
 func networkStateChanged() {
 	// do not block the main thread
@@ -33,6 +57,7 @@ func networkStateChanged() {
 
 func initNetwork() error {
 	ensureConfigLoaded()
+	applyProxyEnvironment(config.NetworkConfig)
 
 	state, err := network.NewNetworkInterfaceState(&network.NetworkInterfaceOptions{
 		DefaultHostname: GetDefaultHostname(),
@@ -131,14 +156,45 @@ func rpcSetNetworkSettings(settings network.RpcNetworkSettings) (*network.RpcNet
 	if err := SaveConfig(); err != nil {
 		return nil, err
 	}
+	applyProxyEnvironment(config.NetworkConfig)
+
+	// refresh time sync server lists so custom servers take effect immediately
+	if timeSync != nil {
+		timeSync.SetNetworkConfig(config.NetworkConfig)
+	}
 
 	return &network.RpcNetworkSettings{NetworkConfig: *config.NetworkConfig}, nil
+}
+
+func rpcGetTimeSyncServers() map[string]interface{} {
+	return map[string]interface{}{
+		"ntp":  timesync.DefaultNTPServers(),
+		"http": timesync.DefaultHTTPUrls(),
+	}
 }
 
 func rpcRenewDHCPLease() error {
 	return networkState.RpcRenewDHCPLease()
 }
 
+// rpcRestartDHCPClient drops the current lease and runs a fresh DHCP discover.
+func rpcRestartDHCPClient() error {
+	return networkState.RpcRestartDHCPClient()
+}
+
 func rpcRequestDHCPAddress(ip string) error {
 	return networkState.RpcRequestDHCPAddress(ip)
+}
+
+const ethernetMacAddressPath = "/userdata/ethaddr.txt"
+
+func rpcSetEthernetMacAddress(macAddress string) (interface{}, error) {
+	normalized, err := networkState.SetMACAddress(macAddress)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(ethernetMacAddressPath, []byte(normalized+"\n"), 0644); err != nil {
+		return nil, fmt.Errorf("failed to write %s: %w", ethernetMacAddressPath, err)
+	}
+	return networkState.RpcGetNetworkState(), nil
 }

@@ -2,10 +2,14 @@ package usbgadget
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -81,7 +85,7 @@ func compareFileContent(oldContent []byte, newContent []byte, looserMatch bool) 
 	return false
 }
 
-func (u *UsbGadget) logWithSupression(counterName string, every int, logger *zerolog.Logger, err error, msg string, args ...interface{}) {
+func (u *UsbGadget) logWithSuppression(counterName string, every int, logger *zerolog.Logger, err error, msg string, args ...interface{}) {
 	u.logLock.Lock()
 	defer u.logLock.Unlock()
 
@@ -106,4 +110,46 @@ func (u *UsbGadget) resetLogSuppressionCounter(counterName string) {
 	if _, ok := u.logSuppressionCounter[counterName]; !ok {
 		u.logSuppressionCounter[counterName] = 0
 	}
+}
+
+// hidWriteTimeout is the deadline for a single HID report. It leaves room for
+// host polling and scheduler delays while the previous report is pending; a
+// 10 ms deadline drops reports during ordinary bursts.
+const hidWriteTimeout = 100 * time.Millisecond
+
+func (u *UsbGadget) writeWithTimeout(file *os.File, data []byte) (n int, err error) {
+	if err := file.SetWriteDeadline(time.Now().Add(hidWriteTimeout)); err != nil {
+		return -1, err
+	}
+
+	n, err = file.Write(data)
+	if err == nil {
+		return
+	}
+
+	u.log.Trace().
+		Str("file", file.Name()).
+		Bytes("data", data).
+		Err(err).
+		Msg("write failed")
+
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		u.logWithSuppression(
+			fmt.Sprintf("writeWithTimeout_%s", file.Name()),
+			1000,
+			u.log,
+			err,
+			"write timed out: %s",
+			file.Name(),
+		)
+	}
+
+	return
+}
+
+// unlockWithLog releases lock after tracing the call, so every deferred unlock
+// in the auto-release path stays auditable at trace level.
+func unlockWithLog(lock *sync.Mutex, logger *zerolog.Logger, msg string, args ...any) {
+	logger.Trace().Msgf(msg, args...)
+	lock.Unlock()
 }

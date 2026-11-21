@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
+	"kvm/internal/mcp"
 )
 
 //nolint:typecheck
@@ -72,14 +75,21 @@ func setupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	gin.DisableConsoleColor()
 	r := gin.Default()
+
+	// Do not trust any forwarding header: gin otherwise believes X-Forwarded-For
+	// from any peer, which would let a client pick its own ClientIP() -- that is
+	// what the login rate limiter buckets on, and what the audit log records.
+	// If the device is ever put behind a reverse proxy, narrow this to that
+	// proxy's address instead of trusting everyone.
+	_ = r.SetTrustedProxies(nil)
+
+	r.Use(limitRequestBody(maxRequestBodyBytes))
 	r.Use(gin_logger.SetLogger(
 		gin_logger.WithLogger(func(*gin.Context, zerolog.Logger) zerolog.Logger {
 			return *ginLogger
 		}),
 	))
 	staticFS, _ := fs.Sub(staticFiles, "static")
-
-	r.Any("/debug/pprof/*any", gin.WrapH(http.DefaultServeMux))
 
 	// Add a custom middleware to set cache headers for images
 	// This is crucial for optimizing the initial welcome screen load time
@@ -104,6 +114,9 @@ func setupRouter() *gin.Engine {
 	r.StaticFS("/static", http.FS(staticFS))
 	r.POST("/auth/login-local", handleLogin)
 
+	// MCP management: enable/disable the MCP server and rotate its API key
+	mcp.RegisterManagementRoutes(r, protectedMiddleware())
+
 	// We use this to determine if the device is setup
 	r.GET("/device/status", handleDeviceStatus)
 
@@ -113,27 +126,33 @@ func setupRouter() *gin.Engine {
 	// We use this to setup the device in the welcome page
 	r.POST("/device/setup", handleSetup)
 
-	// A Prometheus metrics endpoint.
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	// Debug endpoints (pprof + Prometheus metrics) are registered here but gated per
+	// request by devModeOnlyMiddleware: they answer 404 unless developer mode is on.
+	debugRouter := r.Group("/", devModeOnlyMiddleware())
+	{
+		// pprof. Durations are capped because one long CPU profile pegs the single
+		// Cortex-A7 core and makes the device unresponsive.
+		debugRouter.GET("/debug/pprof/", gin.WrapF(pprof.Index))
+		debugRouter.GET("/debug/pprof/cmdline", gin.WrapF(pprof.Cmdline))
+		debugRouter.GET("/debug/pprof/profile", clampProfileSeconds(pprof.Profile, maxProfileSeconds))
+		debugRouter.POST("/debug/pprof/symbol", gin.WrapF(pprof.Symbol))
+		debugRouter.GET("/debug/pprof/symbol", gin.WrapF(pprof.Symbol))
+		debugRouter.GET("/debug/pprof/trace", clampProfileSeconds(pprof.Trace, maxProfileSeconds))
+		debugRouter.GET("/debug/pprof/allocs", gin.WrapH(pprof.Handler("allocs")))
+		debugRouter.GET("/debug/pprof/block", gin.WrapH(pprof.Handler("block")))
+		debugRouter.GET("/debug/pprof/goroutine", gin.WrapH(pprof.Handler("goroutine")))
+		debugRouter.GET("/debug/pprof/heap", gin.WrapH(pprof.Handler("heap")))
+		debugRouter.GET("/debug/pprof/mutex", gin.WrapH(pprof.Handler("mutex")))
+		debugRouter.GET("/debug/pprof/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
+
+		// A Prometheus metrics endpoint.
+		debugRouter.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
 
 	// Developer mode protected routes
 	developerModeRouter := r.Group("/developer/")
 	developerModeRouter.Use(basicAuthProtectedMiddleware(true))
 	{
-		// pprof
-		developerModeRouter.GET("/pprof/", gin.WrapF(pprof.Index))
-		developerModeRouter.GET("/pprof/cmdline", gin.WrapF(pprof.Cmdline))
-		developerModeRouter.GET("/pprof/profile", gin.WrapF(pprof.Profile))
-		developerModeRouter.POST("/pprof/symbol", gin.WrapF(pprof.Symbol))
-		developerModeRouter.GET("/pprof/symbol", gin.WrapF(pprof.Symbol))
-		developerModeRouter.GET("/pprof/trace", gin.WrapF(pprof.Trace))
-		developerModeRouter.GET("/pprof/allocs", gin.WrapH(pprof.Handler("allocs")))
-		developerModeRouter.GET("/pprof/block", gin.WrapH(pprof.Handler("block")))
-		developerModeRouter.GET("/pprof/goroutine", gin.WrapH(pprof.Handler("goroutine")))
-		developerModeRouter.GET("/pprof/heap", gin.WrapH(pprof.Handler("heap")))
-		developerModeRouter.GET("/pprof/mutex", gin.WrapH(pprof.Handler("mutex")))
-		developerModeRouter.GET("/pprof/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
-
 		logging.AttachSSEHandler(developerModeRouter)
 	}
 
@@ -165,9 +184,12 @@ func setupRouter() *gin.Engine {
 		protected.PUT("/auth/password-local", handleUpdatePassword)
 		protected.DELETE("/auth/local-password", handleDeletePassword)
 		protected.POST("/storage/upload", handleUploadHttp)
+		protected.POST("/ota/upload", handleOTAUploadHttp)
+		protected.POST("/ota/upload-local-pkg", handleLocalPackageUploadHttp)
 		protected.GET("/storage/download", handleDownloadHttp)
 		protected.GET("/storage/sd-download", handleSDDownloadHttp)
 		protected.POST("/api/rpc", handleRpcRequest)
+		protected.GET("/api/ice-servers", handleGetIceServers)
 		protected.GET("/terminal/ws", handleTerminalWS)
 		protected.GET("/serial/ws", handleSerialWS)
 		protected.GET("/video/stream", handleVideoStream)
@@ -230,6 +252,88 @@ func handleWebRTCSession(c *gin.Context) {
 var (
 	pingMessage = []byte("ping")
 	pongMessage = []byte("pong")
+)
+
+// WebsocketPingInterval is the interval at which the websocket client sends ping messages
+const WebsocketPingInterval = 15 * time.Second
+
+var (
+	metricConnectionLastPingTimestamp = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kvm_connection_last_ping_timestamp_seconds",
+			Help: "The timestamp when the last ping response was received",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionLastPingReceivedTimestamp = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kvm_connection_last_ping_received_timestamp_seconds",
+			Help: "The timestamp when the last ping request was received",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionLastPingDuration = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kvm_connection_last_ping_duration_seconds",
+			Help: "The duration of the last ping response",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionPingDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "kvm_connection_ping_duration_seconds",
+			Help: "The duration of the ping response",
+			Buckets: []float64{
+				0.1, 0.5, 1, 10,
+			},
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionTotalPingSentCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kvm_connection_ping_sent_total",
+			Help: "The total number of pings sent to the connection",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionTotalPingReceivedCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kvm_connection_ping_received_total",
+			Help: "The total number of pings received from the connection",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionSessionRequestCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kvm_connection_session_requests_total",
+			Help: "The total number of session requests received",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionSessionRequestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "kvm_connection_session_request_duration_seconds",
+			Help: "The duration of session requests",
+			Buckets: []float64{
+				0.1, 0.5, 1, 10,
+			},
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionLastSessionRequestTimestamp = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kvm_connection_last_session_request_timestamp_seconds",
+			Help: "The timestamp of the last session request",
+		},
+		[]string{"type", "source"},
+	)
+	metricConnectionLastSessionRequestDuration = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kvm_connection_last_session_request_duration",
+			Help: "The duration of the last session request",
+		},
+		[]string{"type", "source"},
+	)
 )
 
 func handleLocalWebRTCSignal(c *gin.Context) {
@@ -448,6 +552,14 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 
+	// the per-IP budget alone is not a bound on guessing, this is
+	if allowed, wait := CheckGlobalRateLimit(); !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error": fmt.Sprintf("Too many failed attempts on this device. Please try again in %s", wait.Round(time.Second)),
+		})
+		return
+	}
+
 	var req LoginRequest
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -458,30 +570,78 @@ func handleLogin(c *gin.Context) {
 	err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(req.Password))
 	if err != nil {
 		RecordFailure(ip)
+		RecordGlobalFailure()
+		// record the address the connection actually came from, the headers are
+		// client-controlled metadata
+		logger.Warn().Str("ip", ip).Str("remoteAddr", c.Request.RemoteAddr).Msg("local login failed")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
 		return
 	}
 
 	RecordSuccess(ip)
+	RecordGlobalSuccess()
 
-	config.LocalAuthToken = uuid.New().String()
+	token, err := newLocalSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		return
+	}
 
-	// Set the cookie (Session cookie, expires on browser close)
-	c.SetCookie("authToken", config.LocalAuthToken, 0, "/", "", false, true)
+	setAuthCookie(c, token)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Login successful"})
 }
 
 func handleLogout(c *gin.Context) {
-	config.LocalAuthToken = ""
-	if err := SaveConfig(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
-		return
-	}
-
-	// Clear the auth cookie
-	c.SetCookie("authToken", "", -1, "/", "", false, true)
+	dropLocalSession(cookieValue(c, "authToken"))
+	clearAuthCookie(c)
 	c.JSON(http.StatusOK, gin.H{"message": "Logout successful"})
+}
+
+// maxProfileSeconds caps how long /debug/pprof/profile and /debug/pprof/trace may
+// sample the CPU. The device has a single core, so a long profile makes it unusable.
+const maxProfileSeconds = 10
+
+// devModeOnlyMiddleware gates the debug endpoints (pprof, metrics). Developer mode
+// must be enabled. Password-protected setups additionally require the WebUI session
+// cookie, while noPassword setups are let through so the debug panel stays usable.
+func devModeOnlyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		devModeState, err := rpcGetDevModeState()
+		if err != nil || !devModeState.Enabled {
+			// Answer 404 so the endpoints do not advertise their existence.
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+
+		if config.LocalAuthMode != "noPassword" {
+			if !validLocalSession(cookieValue(c, "authToken")) {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+		}
+
+		c.Next()
+	}
+}
+
+// clampProfileSeconds rewrites the seconds query parameter so a single request cannot
+// sample the CPU for longer than maxSeconds. pprof defaults to 30s when the parameter
+// is missing, so the default has to be clamped as well.
+func clampProfileSeconds(handler http.HandlerFunc, maxSeconds int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		query := c.Request.URL.Query()
+		seconds := maxSeconds
+		if raw := query.Get("seconds"); raw != "" {
+			if requested, err := strconv.Atoi(raw); err == nil && requested > 0 && requested < seconds {
+				seconds = requested
+			}
+		}
+		query.Set("seconds", strconv.Itoa(seconds))
+		c.Request.URL.RawQuery = query.Encode()
+
+		handler(c.Writer, c.Request)
+	}
 }
 
 func protectedMiddleware() gin.HandlerFunc {
@@ -491,8 +651,8 @@ func protectedMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		authToken, err := c.Cookie("authToken")
-		if err != nil || authToken != config.LocalAuthToken || authToken == "" {
+		authToken := cookieValue(c, "authToken")
+		if !validLocalSession(authToken) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			c.Abort()
 			return
@@ -540,10 +700,15 @@ func basicAuthProtectedMiddleware(requireDeveloperMode bool) gin.HandlerFunc {
 			sendErrorJsonThenAbort(c, http.StatusTooManyRequests, fmt.Sprintf("Too many failed attempts. Please try again in %s", wait.Round(time.Second)))
 			return
 		}
+		if allowed, wait := CheckGlobalRateLimit(); !allowed {
+			sendErrorJsonThenAbort(c, http.StatusTooManyRequests, fmt.Sprintf("Too many failed attempts on this device. Please try again in %s", wait.Round(time.Second)))
+			return
+		}
 
 		err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(password))
 		if err != nil {
 			RecordFailure(ip)
+			RecordGlobalFailure()
 			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Invalid password")
 			return
 		}
@@ -607,15 +772,19 @@ func handleCreatePassword(c *gin.Context) {
 	}
 
 	config.HashedPassword = string(hashedPassword)
-	config.LocalAuthToken = uuid.New().String()
+	config.LocalAuthToken = ""
 	config.LocalAuthMode = "password"
 	if err := SaveConfig(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
 		return
 	}
 
-	// Set the cookie (Session cookie, expires on browser close)
-	c.SetCookie("authToken", config.LocalAuthToken, 0, "/", "", false, true)
+	token, err := newLocalSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		return
+	}
+	setAuthCookie(c, token)
 
 	c.JSON(http.StatusCreated, gin.H{"message": "Password set successfully"})
 }
@@ -651,14 +820,21 @@ func handleUpdatePassword(c *gin.Context) {
 	}
 
 	config.HashedPassword = string(hashedPassword)
-	config.LocalAuthToken = uuid.New().String()
+	config.LocalAuthToken = ""
 	if err := SaveConfig(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
 		return
 	}
 
-	// Set the cookie (Session cookie, expires on browser close)
-	c.SetCookie("authToken", config.LocalAuthToken, 0, "/", "", false, true)
+	// rotating the password must log out every session opened with the old one
+	dropAllLocalSessions()
+
+	token, err := newLocalSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		return
+	}
+	setAuthCookie(c, token)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password updated successfully"})
 }
@@ -694,7 +870,8 @@ func handleDeletePassword(c *gin.Context) {
 		return
 	}
 
-	c.SetCookie("authToken", "", -1, "/", "", false, true)
+	dropAllLocalSessions()
+	clearAuthCookie(c)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password disabled successfully"})
 }
@@ -756,10 +933,7 @@ func handleSetup(c *gin.Context) {
 		}
 
 		config.HashedPassword = string(hashedPassword)
-		config.LocalAuthToken = uuid.New().String()
-
-		// Set the cookie (Session cookie, expires on browser close)
-		c.SetCookie("authToken", config.LocalAuthToken, 0, "/", "", false, true)
+		config.LocalAuthToken = ""
 	} else {
 		// For noPassword mode, ensure the password field is empty
 		config.HashedPassword = ""
@@ -772,12 +946,25 @@ func handleSetup(c *gin.Context) {
 		return
 	}
 
+	if config.LocalAuthMode == "password" {
+		token, tokenErr := newLocalSession()
+		if tokenErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+			return
+		}
+		setAuthCookie(c, token)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Device setup completed successfully"})
 }
 
 func handleRpcRequest(c *gin.Context) {
 	var req JSONRPCRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if isBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON RPC request"})
 		return
 	}
@@ -873,6 +1060,11 @@ func handleRpcRequest(c *gin.Context) {
 	httpSessionMu.Unlock()
 
 	if invalid {
+		if isJSONRPCNotification(req) {
+			c.Status(http.StatusNoContent)
+			return
+		}
+
 		response := JSONRPCResponse{
 			JSONRPC: "2.0",
 			Error: map[string]interface{}{
@@ -896,6 +1088,11 @@ func handleRpcRequest(c *gin.Context) {
 
 	response, _ := DispatchRPCRequest(req)
 
+	if isJSONRPCNotification(req) {
+		c.Status(http.StatusNoContent)
+		return
+	}
+
 	if event != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"response": response,
@@ -905,6 +1102,16 @@ func handleRpcRequest(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+func handleGetIceServers(c *gin.Context) {
+	LoadConfig()
+	servers, err := rpcGetIceServers()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"iceServers": servers})
 }
 
 func handleVideoStream(c *gin.Context) {
@@ -931,23 +1138,123 @@ func handleVideoStream(c *gin.Context) {
 
 	for {
 		select {
-		case data, ok := <-ch:
+		case frame, ok := <-ch:
 			if !ok {
 				logger.Info().Int("total_frames", frameCount).Msg("video broadcaster channel closed")
 				return
 			}
+			data := frame.Data()
 			frameCount++
 			if frameCount == 1 {
 				logger.Info().Int("size", len(data)).Msg("first video frame received")
 			}
 			if _, err := c.Writer.Write(data); err != nil {
 				logger.Warn().Err(err).Int("total_frames", frameCount).Msg("error writing video data")
+				frame.Release()
 				return
 			}
 			c.Writer.Flush()
+			frame.Release()
 		case <-ctx.Done():
 			logger.Info().Int("total_frames", frameCount).Msg("client disconnected")
 			return
 		}
 	}
+}
+
+func handleSessionRequest(
+	ctx context.Context,
+	c *websocket.Conn,
+	req WebRTCSessionRequest,
+	source string,
+	scopedLogger *zerolog.Logger,
+) error {
+	var sourceType = "local"
+
+	timer := prometheus.NewTimer(
+		prometheus.ObserverFunc(func(v float64) {
+			metricConnectionLastSessionRequestDuration.WithLabelValues(sourceType, source).Set(v)
+			metricConnectionSessionRequestDuration.WithLabelValues(sourceType, source).Observe(v)
+		}),
+	)
+	defer timer.ObserveDuration()
+
+	session, err := newSession(SessionConfig{
+		ws:         c,
+		LocalIP:    req.IP,
+		ICEServers: req.ICEServers,
+		Logger:     scopedLogger,
+	})
+	if err != nil {
+		_ = wsjson.Write(context.Background(), c, gin.H{"error": err})
+		return err
+	}
+
+	sd, err := session.ExchangeOffer(req.Sd)
+	if err != nil {
+		_ = wsjson.Write(context.Background(), c, gin.H{"error": err})
+		return err
+	}
+	if currentSession != nil {
+		writeJSONRPCEvent("otherSessionConnected", nil, currentSession)
+		peerConn := currentSession.peerConnection
+		go func() {
+			time.Sleep(1 * time.Second)
+			_ = peerConn.Close()
+		}()
+	}
+
+	logger.Info().Interface("session", session).Msg("new session accepted")
+	logger.Trace().Interface("session", session).Msg("new session accepted")
+	currentSession = session
+	_ = wsjson.Write(context.Background(), c, gin.H{"type": "answer", "data": sd})
+	return nil
+}
+
+// maxRequestBodyBytes caps how much of a request body the server will read.
+// Every JSON control request is a few KiB; the largest legitimate JSON payload
+// is a base64 storage paste of a few hundred KiB, so 1 MiB is generous. Without
+// a cap a client can make the device buffer an arbitrary amount of memory, and
+// the oversized body is rejected before authentication runs so it costs no
+// cycles.
+const maxRequestBodyBytes = 1 << 20
+
+// maxUploadBytes caps the streaming uploads. Their handlers write straight to
+// disk instead of buffering, so the cap only bounds how much a single session can
+// put on the filesystem, not memory. Firmware images are tens of MiB.
+const maxUploadBytes = 512 << 20
+
+// uploadRoutes stream their bodies to disk and therefore get the upload cap
+// instead of the JSON one. Keyed by gin's route pattern.
+var uploadRoutes = map[string]int64{
+	"/storage/upload":       maxUploadBytes,
+	"/ota/upload":           maxUploadBytes,
+	"/ota/upload-local-pkg": maxUploadBytes,
+}
+
+// limitRequestBody rejects oversized requests and hard-caps the reader so a
+// body sent without Content-Length (chunked) is bounded as well.
+func limitRequestBody(limit int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		limit := limit
+		if routeLimit, ok := uploadRoutes[c.FullPath()]; ok {
+			limit = routeLimit
+		}
+
+		if c.Request.ContentLength > limit {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			return
+		}
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		}
+		c.Next()
+	}
+}
+
+// isBodyTooLarge reports whether a bind error was caused by the body limit
+// rather than by malformed input, so the client gets 413 instead of 400.
+func isBodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
 }

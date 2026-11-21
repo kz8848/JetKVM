@@ -15,7 +15,9 @@ export const keys = {
   BracketRight: 0x30,
   CapsLock: 0x39,
   Comma: 0x36,
-  ContextMenu: 0,
+  // HID "Keyboard Application". Was 0, which the host reads as "no event", so
+  // the Menu key did nothing at all.
+  ContextMenu: 0x65,
   Delete: 0x4c,
   Digit0: 0x27,
   Digit1: 0x1e,
@@ -105,6 +107,18 @@ export const keys = {
   Space: 0x2c,
   SystemRequest: 0x9a,
   Tab: 0x2b,
+  Yen: 0x89,
+  // Keep the Mac alias on the physical JIS yen key, not Backslash ("]" on JIS).
+  YenMac: 0x89,
+  KeyRO: 0x87,
+  Henkan: 0x8a,
+  Muhenkan: 0x8b,
+  KatakanaHiragana: 0x88,
+  // macOS reports the JIS IME keys as LANG1 (kana) and LANG2 (eisu), not as
+  // KATAKANAHIRAGANA. Kept apart from KatakanaHiragana so the Mac layouts can
+  // pick the usage macOS actually maps, while Windows/Linux keep 0x88.
+  Lang1: 0x90,
+  Lang2: 0x91,
 } as Record<string, number>;
 
 export const modifiers = {
@@ -206,6 +220,24 @@ export const keyDisplayMap: Record<string, string> = {
   Backquote: "`",
   "(Backquote)": "~",
   IntlBackslash: "\\",
+  // Shift-row spellings follow the "(Backslash)": "|" convention above: the
+  // parenthesised name is what a shift row carries so it can show its own label.
+  "(IntlBackslash)": "|",
+  // Present only when the keyboard form factor is ISO/JIS; the labels live in the
+  // base map so every language layout shows them without its own copy.
+  Yen: "¥",
+  "(Yen)": "|",
+  YenMac: "¥",
+  KeyRO: "ろ",
+  "(KeyRO)": "_",
+  Henkan: "変換",
+  Muhenkan: "無変換",
+  KatakanaHiragana: "かな",
+  "(Henkan)": "変換",
+  "(Muhenkan)": "無変換",
+  "(KatakanaHiragana)": "かな",
+  Lang1: "かな",
+  Lang2: "英数",
 
   // Function keys
   F1: "F1", F2: "F2", F3: "F3", F4: "F4",
@@ -227,6 +259,17 @@ export const keyDisplayMap: Record<string, string> = {
   SystemRequest: "sys rq", Break: "break",
 
 };
+
+export const latchingKeys = ["CapsLock", "ScrollLock", "NumLock", "MetaLeft", "MetaRight", "Compose", "Kana"];
+
+export function decodeModifiers(modifier: number) {
+  return {
+    isShiftActive: (modifier & (modifiers.ShiftLeft | modifiers.ShiftRight)) !== 0,
+    isControlActive: (modifier & (modifiers.ControlLeft | modifiers.ControlRight)) !== 0,
+    isAltActive: (modifier & (modifiers.AltLeft | modifiers.AltRight)) !== 0,
+    isMetaActive: (modifier & (modifiers.MetaLeft | modifiers.MetaRight)) !== 0,
+  };
+}
 
 export const keyDisplayMap2: Record<string, string> = {
   ...keyDisplayMap,

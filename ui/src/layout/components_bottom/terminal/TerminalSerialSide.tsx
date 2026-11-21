@@ -23,6 +23,7 @@ interface SerialSettings {
   dataBits: string;
   stopBits: string;
   parity: string;
+  connected?: boolean;
 }
 
 interface TerminalSerialSideProps {
@@ -64,11 +65,14 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
         );
         return;
       }
-      console.log(resp.result)
       const newSettings = resp.result as SerialSettings;
       setSettings(newSettings);
       form.setFieldsValue(newSettings);
-      
+
+      // The port state lives in the backend: a page reload keeps the port open,
+      // so trust the server instead of the local button state.
+      setIsConnected(newSettings.connected === true);
+
       // Ensure current baud rate is in options
       if (!defaultBaudRates.includes(newSettings.baudRate)) {
         setBaudOptions([...defaultBaudRates, newSettings.baudRate]);
@@ -99,14 +103,8 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
       .validateFields()
       .then(values => {
         if (isConnected) {
-          // If connected, disconnect
-          send("setSerialDevice", {
-            baudRate: 0,
-            dataBits: 0,
-            stopBits: 0,
-            parity: 0,
-            flowControl: 0,
-          }, () => {
+          // If connected, disconnect - use disconnectSerial RPC
+          send("disconnectSerial", {}, () => {
             // After disconnecting serial, reset IO input status
             send("resetIOInput", {}, () => {
               setIsConnected(false);
@@ -115,27 +113,31 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
             });
           });
         } else {
-          // If disconnected, connect
+          // If disconnected, connect - first save settings, then connect
+          console.log("Saving serial settings:", values);
           send(
-            "setSerialDevice",
+            "setSerialSettings",
             {
-              baudRate: Number(values.baudRate),
-              dataBits: Number(values.dataBits),
-              stopBits: Number(values.stopBits),
-              parity:
-                values.parity === "none"
-                  ? 0
-                  : values.parity === "odd"
-                  ? 1
-                  : values.parity === "even"
-                  ? 2
-                  : 0,
-              flowControl: 0,
+              settings: {
+                baudRate: values.baudRate,
+                dataBits: values.dataBits,
+                stopBits: values.stopBits,
+                parity: values.parity,
+              }
             },
-            () => {
-              setIsConnected(true);
-              notifications.success($at("Connected"));
-              setRefreshFlag(f => f + 1);
+            (resp) => {
+              if ("error" in resp) {
+                console.error("Failed to save serial settings:", resp.error);
+                notifications.error($at("Failed to save settings"));
+                return;
+              }
+              console.log("Serial settings saved successfully");
+              // Now connect with the saved settings
+              send("connectSerial", {}, () => {
+                setIsConnected(true);
+                notifications.success($at("Connected"));
+                setRefreshFlag(f => f + 1);
+              });
             }
           );
         }
@@ -169,6 +171,7 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
             onMouseDown={handleSelectMouseDown}
             onOpenChange={(open) => setDisableKeyboardFocusTrap(open)}
             showSearch
+            disabled={isConnected}
             onChange={(value) => {
                setSettings(prev => ({...prev, baudRate: value}));
                updateBaudOptions(value);
@@ -198,6 +201,7 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
             placeholder={$at("Choose Data Bits")}
             onMouseDown={handleSelectMouseDown}
             onOpenChange={(open) => setDisableKeyboardFocusTrap(open)}
+            disabled={isConnected}
           >
             <Option value="5">5</Option>
             <Option value="6">6</Option>
@@ -216,6 +220,7 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
             placeholder={$at("Choose Stop Bits")}
             onMouseDown={handleSelectMouseDown}
             onOpenChange={(open) => setDisableKeyboardFocusTrap(open)}
+            disabled={isConnected}
           >
             <Option value="1">1</Option>
             <Option value="1.5">1.5</Option>
@@ -233,6 +238,7 @@ const TerminalSerialSide: React.FC<TerminalSerialSideProps> = ({ clearTerminal }
             onMouseDown={handleSelectMouseDown}
             onOpenChange={(open) => setDisableKeyboardFocusTrap(open)}
             placeholder={$at("Choose Parity")}
+            disabled={isConnected}
           >
             <Option value="none">None</Option>
             <Option value="even">Even</Option>

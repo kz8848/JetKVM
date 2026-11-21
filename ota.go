@@ -1,9 +1,11 @@
 package kvm
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -17,9 +19,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/gin-gonic/gin"
 	"github.com/gwatts/rootcerts"
 	"github.com/rs/zerolog"
 )
@@ -38,21 +42,62 @@ type LocalMetadata struct {
 	SystemVersion string `json:"systemVersion"`
 }
 
+type LocalPackageInfo struct {
+	AppVersion    string `json:"appVersion"`
+	SystemVersion string `json:"systemVersion"`
+	HasApp        bool   `json:"hasApp"`
+	HasSystem     bool   `json:"hasSystem"`
+}
+
+func GetLocalPackageInfo() (*LocalPackageInfo, error) {
+	pkgDir := localPackageDir
+	// Read version.txt
+	versionPath := filepath.Join(pkgDir, "version.txt")
+	data, err := os.ReadFile(versionPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read version.txt: %w", err)
+	}
+
+	// Parse version.txt
+	appVersion, systemVersion, err := parseVersionTxt(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse version.txt: %w", err)
+	}
+
+	// Check if firmware files exist
+	_, appErr := os.Stat(filepath.Join(pkgDir, "kvm_app"))
+	_, sysErr := os.Stat(filepath.Join(pkgDir, "update_system.zip"))
+
+	return &LocalPackageInfo{
+		AppVersion:    appVersion,
+		SystemVersion: systemVersion,
+		HasApp:        appErr == nil,
+		HasSystem:     sysErr == nil,
+	}, nil
+}
+
 type RemoteMetadata struct {
 	AppVersion    string `json:"appVersion"`
 	AppUrl        string `json:"appUrl"`
 	AppHash       string `json:"appHash"`
+	AppSigUrl     string `json:"appSigUrl,omitempty"`
 	SystemUrl     string `json:"systemUrl"`
 	SystemHash    string `json:"systemHash,omitempty"`
+	SystemSigUrl  string `json:"systemSigUrl,omitempty"`
 	SystemVersion string `json:"systemVersion"`
 }
 
 // UpdateStatus represents the current update status
 type UpdateStatus struct {
-	Local                 *LocalMetadata  `json:"local"`
-	Remote                *RemoteMetadata `json:"remote"`
-	SystemUpdateAvailable bool            `json:"systemUpdateAvailable"`
-	AppUpdateAvailable    bool            `json:"appUpdateAvailable"`
+	Local                  *LocalMetadata  `json:"local"`
+	Remote                 *RemoteMetadata `json:"remote"`
+	SystemUpdateAvailable  bool            `json:"systemUpdateAvailable"`
+	AppUpdateAvailable     bool            `json:"appUpdateAvailable"`
+	AppSignatureMissing    bool            `json:"appSignatureMissing,omitempty"`
+	SystemSignatureMissing bool            `json:"systemSignatureMissing,omitempty"`
 
 	// for backwards compatibility
 	Error string `json:"error,omitempty"`
@@ -62,7 +107,12 @@ var UpdateGithubAppReleaseUrls = []string{
 	"https://api.github.com/repos/kz8848/JetKVM/releases/latest",
 }
 
-
+var UpdateGiteeAppReleaseUrls = []string{
+	"https://gitee.com/api/v5/repos/LuckfoxTECH/kvm/releases/latest",
+	"https://gitee.com/api/v5/repos/LuckfoxTECH/kvm_app/releases/latest",
+	"https://gitee.com/api/v5/repos/luckfox-eng29/kvm/releases/latest",
+	"https://gitee.com/api/v5/repos/luckfox-eng29/kvm_app/releases/latest",
+}
 
 var UpdateGithubSystemReleaseUrls = []string{
 	"https://api.github.com/repos/LuckfoxTECH/kvm_system/releases/latest",
@@ -79,23 +129,30 @@ var UpdateGiteeSystemZipUrls = []string{
 	"https://gitee.com/luckfox-eng29/kvm_system/archive/refs/tags/",
 }
 
-const cdnUpdateBaseURL = "https://www.jetkvm.cn/ota/download/lastest.json"
+const cdnUpdateBaseURL = "https://cdn.picokvm.top/luckfox_picokvm_firmware/lastest/"
 
-var builtAppVersion = "0.1.2+dev"
+var builtAppVersion = "0.1.4+dev"
 
-var updateSource = "github"
-var customUpdateBaseURL string
+var (
+	updateSource        = "github"
+	customUpdateBaseURL string
+)
 
 const (
 	updateSourceGithub = "github"
 	updateSourceGitee  = "gitee"
 	updateSourceCDN    = "cdn"
 	updateSourceCustom = "custom"
+	updateSourceLocal  = "local"
+	localPackageDir    = "/userdata/picokvm/ota_local_pkg"
 )
+
+// otaUploadMutex prevents concurrent uploads and updates
+var otaUploadMutex sync.Mutex
 
 func rpcSetUpdateSource(source string) error {
 	switch source {
-	case updateSourceGithub, updateSourceGitee, updateSourceCDN, updateSourceCustom:
+	case updateSourceGithub, updateSourceGitee, updateSourceCDN, updateSourceCustom, updateSourceLocal:
 	default:
 		return fmt.Errorf("invalid update source: %s", source)
 	}
@@ -122,7 +179,7 @@ func GetLocalVersion() (systemVersion *semver.Version, appVersion *semver.Versio
 	return systemVersion, appVersion, nil
 }
 
-func fetchUpdateMetadata(ctx context.Context, deviceId string, includePreRelease bool) (*RemoteMetadata, error) {
+func fetchUpdateMetadata(ctx context.Context, deviceId string) (*RemoteMetadata, error) {
 	if updateSource == updateSourceCDN || updateSource == updateSourceCustom {
 		baseURL := cdnUpdateBaseURL
 		if updateSource == updateSourceCustom {
@@ -134,14 +191,14 @@ func fetchUpdateMetadata(ctx context.Context, deviceId string, includePreRelease
 		return fetchUpdateMetadataFromBaseURL(ctx, baseURL)
 	}
 
-	_, _ = deviceId, includePreRelease
+	_ = deviceId
 
-	appVersionRemote, appURL, appSha256, err := fetchKvmAppLatestRelease(ctx)
+	appVersionRemote, appURL, appSha256, appSigURL, err := fetchKvmAppLatestRelease(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	systemVersionRemote, systemZipURL, err := fetchKvmSystemLatestRelease(ctx)
+	systemVersionRemote, systemZipURL, systemSigURL, err := fetchKvmSystemLatestRelease(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -150,12 +207,14 @@ func fetchUpdateMetadata(ctx context.Context, deviceId string, includePreRelease
 		AppUrl:        appURL,
 		AppVersion:    appVersionRemote,
 		AppHash:       appSha256,
+		AppSigUrl:     appSigURL,
 		SystemUrl:     systemZipURL,
 		SystemVersion: systemVersionRemote,
+		SystemSigUrl:  systemSigURL,
 	}, nil
 }
 
-func fetchKvmAppLatestRelease(ctx context.Context) (tag string, downloadURL string, sha256 string, err error) {
+func fetchKvmAppLatestRelease(ctx context.Context) (tag string, downloadURL string, sha256 string, sigURL string, err error) {
 	apiURLs := UpdateGithubAppReleaseUrls
 	fallbackToGithub := false
 //	if updateSource == updateSourceGitee {
@@ -163,7 +222,7 @@ func fetchKvmAppLatestRelease(ctx context.Context) (tag string, downloadURL stri
 //		fallbackToGithub = true
 //	}
 
-	tryFetch := func(urls []string) (string, string, string, error) {
+	tryFetch := func(urls []string) (string, string, string, string, error) {
 		var lastErr error
 		for _, apiURL := range urls {
 			req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
@@ -210,44 +269,54 @@ func fetchKvmAppLatestRelease(ctx context.Context) (tag string, downloadURL stri
 				continue
 			}
 
-			var downloadURL string
-			var sha256 string
-			if len(release.Assets) > 0 {
-				downloadURL = release.Assets[0].BrowserDownloadURL
-				sha256 = release.Assets[0].Digest
+			var downloadURL, sha256, sigURL string
+			for _, asset := range release.Assets {
+				name := strings.ToLower(strings.TrimSpace(asset.Name))
+				u := strings.TrimSpace(asset.BrowserDownloadURL)
+				if strings.HasSuffix(name, ".sig") || strings.HasSuffix(name, ".sha256") || strings.HasSuffix(name, ".sha2565") {
+					if strings.HasSuffix(name, ".sig") && sigURL == "" {
+						sigURL = u
+					}
+					continue
+				}
+				if downloadURL == "" {
+					downloadURL = u
+					sha256 = strings.TrimPrefix(strings.TrimSpace(asset.Digest), "sha256:")
+				}
 			}
-			sha256 = strings.TrimPrefix(strings.TrimSpace(sha256), "sha256:")
 
 			if strings.TrimSpace(downloadURL) == "" {
 				lastErr = fmt.Errorf("empty app download url from %s", apiURL)
 				continue
 			}
 
-			return tag, downloadURL, sha256, nil
+			return tag, downloadURL, sha256, sigURL, nil
 		}
 
 		if lastErr == nil {
 			lastErr = fmt.Errorf("no app release API URLs configured")
 		}
-		return "", "", "", lastErr
+		return "", "", "", "", lastErr
 	}
 
 	var lastErr error
-	tag, downloadURL, sha256, err = tryFetch(apiURLs)
+	tag, downloadURL, sha256, sigURL, err = tryFetch(apiURLs)
 	if err == nil {
-		return tag, downloadURL, sha256, nil
+		return tag, downloadURL, sha256, sigURL, nil
 	}
 
 	lastErr = err
 	if updateSource == updateSourceGitee && fallbackToGithub {
-		tag, downloadURL, sha256, err = tryFetch(UpdateGithubAppReleaseUrls)
+		var ghSigURL string
+		tag, downloadURL, sha256, ghSigURL, err = tryFetch(UpdateGithubAppReleaseUrls)
 		if err == nil {
 			downloadURL = strings.Replace(downloadURL, "github.com", "gitee.com", 1)
-			return tag, downloadURL, sha256, nil
+			ghSigURL = strings.Replace(ghSigURL, "github.com", "gitee.com", 1)
+			return tag, downloadURL, sha256, ghSigURL, nil
 		}
 		lastErr = fmt.Errorf("gitee app release fetch failed (%v); github fallback failed (%w)", lastErr, err)
 	}
-	return "", "", "", lastErr
+	return "", "", "", "", lastErr
 }
 
 type releaseAsset struct {
@@ -273,7 +342,7 @@ func pickZipAssetURL(assets []releaseAsset) string {
 	return ""
 }
 
-func fetchKvmSystemLatestRelease(ctx context.Context) (tag string, zipURL string, err error) {
+func fetchKvmSystemLatestRelease(ctx context.Context) (tag string, zipURL string, sigURL string, err error) {
 	apiURLs := UpdateGithubSystemReleaseUrls
 	fallbackToGithub := false
 	if updateSource == updateSourceGitee {
@@ -328,11 +397,18 @@ func fetchKvmSystemLatestRelease(ctx context.Context) (tag string, zipURL string
 			continue
 		}
 
+		var sysSigURL string
+		for _, asset := range release.Assets {
+			name := strings.ToLower(strings.TrimSpace(asset.Name))
+			if strings.HasSuffix(name, ".sig") && sysSigURL == "" {
+				sysSigURL = strings.TrimSpace(asset.BrowserDownloadURL)
+			}
+		}
 		if u := pickZipAssetURL(release.Assets); strings.TrimSpace(u) != "" {
-			return tag, strings.TrimSpace(u), nil
+			return tag, strings.TrimSpace(u), sysSigURL, nil
 		}
 		if strings.TrimSpace(release.ZipballURL) != "" {
-			return tag, strings.TrimSpace(release.ZipballURL), nil
+			return tag, strings.TrimSpace(release.ZipballURL), sysSigURL, nil
 		}
 
 		lastErr = fmt.Errorf("no usable system archive url in release response from %s", apiURL)
@@ -347,22 +423,22 @@ func fetchKvmSystemLatestRelease(ctx context.Context) (tag string, zipURL string
 		var githubTag string
 		var githubZipURL string
 		for i, apiURL := range UpdateGithubSystemReleaseUrls {
-			githubTag, githubZipURL, githubErr = func(apiURL string) (string, string, error) {
+			githubTag, githubZipURL, _, githubErr = func(apiURL string) (string, string, string, error) {
 				req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 				if err != nil {
-					return "", "", fmt.Errorf("error creating system release request: %w", err)
+					return "", "", "", fmt.Errorf("error creating system release request: %w", err)
 				}
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
-					return "", "", fmt.Errorf("error fetching system release: %w", err)
+					return "", "", "", fmt.Errorf("error fetching system release: %w", err)
 				}
 				body, readErr := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				if readErr != nil {
-					return "", "", fmt.Errorf("error reading system release response: %w", readErr)
+					return "", "", "", fmt.Errorf("error reading system release response: %w", readErr)
 				}
 				if resp.StatusCode != http.StatusOK {
-					return "", "", fmt.Errorf(
+					return "", "", "", fmt.Errorf(
 						"unexpected status code fetching system release from %s: %d, %s",
 						apiURL,
 						resp.StatusCode,
@@ -375,19 +451,26 @@ func fetchKvmSystemLatestRelease(ctx context.Context) (tag string, zipURL string
 					Assets     []releaseAsset `json:"assets"`
 				}
 				if err := json.Unmarshal(body, &release); err != nil {
-					return "", "", fmt.Errorf("error parsing system release JSON from %s: %w", apiURL, err)
+					return "", "", "", fmt.Errorf("error parsing system release JSON from %s: %w", apiURL, err)
 				}
 				tag := strings.TrimSpace(release.TagName)
 				if tag == "" {
-					return "", "", fmt.Errorf("empty system tag_name from %s", apiURL)
+					return "", "", "", fmt.Errorf("empty system tag_name from %s", apiURL)
+				}
+				var sigURL string
+				for _, asset := range release.Assets {
+					name := strings.ToLower(strings.TrimSpace(asset.Name))
+					if strings.HasSuffix(name, ".sig") && sigURL == "" {
+						sigURL = strings.TrimSpace(asset.BrowserDownloadURL)
+					}
 				}
 				if u := pickZipAssetURL(release.Assets); strings.TrimSpace(u) != "" {
-					return tag, strings.TrimSpace(u), nil
+					return tag, strings.TrimSpace(u), sigURL, nil
 				}
 				if strings.TrimSpace(release.ZipballURL) != "" {
-					return tag, strings.TrimSpace(release.ZipballURL), nil
+					return tag, strings.TrimSpace(release.ZipballURL), sigURL, nil
 				}
-				return "", "", fmt.Errorf("no usable system archive url in release response from %s", apiURL)
+				return "", "", "", fmt.Errorf("no usable system archive url in release response from %s", apiURL)
 			}(apiURL)
 			if githubErr == nil && strings.TrimSpace(githubTag) != "" {
 				_ = githubZipURL
@@ -406,15 +489,15 @@ func fetchKvmSystemLatestRelease(ctx context.Context) (tag string, zipURL string
 						zipTag = strings.TrimPrefix(zipTag, "V")
 					}
 					zipURL := strings.TrimRight(selectedZipURL, "/") + "/" + zipTag + ".zip"
-					return githubTag, zipURL, nil
+					return githubTag, zipURL, "", nil
 				}
 				githubErr = fmt.Errorf("no gitee system zip urls configured")
 				break
 			}
 		}
-		return "", "", fmt.Errorf("gitee system release fetch failed (%v); github fallback failed (%w)", lastErr, githubErr)
+		return "", "", "", fmt.Errorf("gitee system release fetch failed (%v); github fallback failed (%w)", lastErr, githubErr)
 	}
-	return "", "", lastErr
+	return "", "", "", lastErr
 }
 
 func fetchUpdateMetadataFromBaseURL(ctx context.Context, baseURL string) (*RemoteMetadata, error) {
@@ -488,13 +571,21 @@ func fetchUpdateMetadataFromBaseURL(ctx context.Context, baseURL string) (*Remot
 		}
 	}
 
+	appSigURL, _ := resolveURL(baseURL, "kvm_app.sig")
+	systemSigURL, _ := resolveURL(baseURL, "update_system.zip.sig")
+	if strings.HasSuffix(systemURL, ".tar") {
+		systemSigURL, _ = resolveURL(baseURL, "update_system.tar.sig")
+	}
+
 	return &RemoteMetadata{
 		AppVersion:    appVersion,
 		AppUrl:        appURL,
 		AppHash:       appHash,
+		AppSigUrl:     appSigURL,
 		SystemVersion: systemVersion,
 		SystemUrl:     systemURL,
 		SystemHash:    systemHash,
+		SystemSigUrl:  systemSigURL,
 	}, nil
 }
 
@@ -877,7 +968,7 @@ func downloadFile(
 	}
 
 	// Clear the filesystem caches to force a read from disk
-	err = os.WriteFile("/proc/sys/vm/drop_caches", []byte("1"), 0644)
+	err = os.WriteFile("/proc/sys/vm/drop_caches", []byte("1"), 0o644)
 	if err != nil {
 		otaLogger.Warn().Err(err).Msg("Failed to clear filesystem caches")
 	}
@@ -901,6 +992,8 @@ func prepareSystemUpdateTarFromKvmSystemZip(
 	downloadProgress *float32,
 	downloadSpeedBps *float32,
 	verificationProgress *float32,
+	sigURL string,
+	expectedHash string,
 	scopedLogger *zerolog.Logger,
 ) error {
 	if scopedLogger == nil {
@@ -912,14 +1005,14 @@ func prepareSystemUpdateTarFromKvmSystemZip(
 	extractDir := filepath.Join(workDir, "extract")
 	zipPath := filepath.Join(workDir, "master.zip")
 
-	if err := os.MkdirAll(workDir, 0755); err != nil {
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return fmt.Errorf("error creating work dir: %w", err)
 	}
 
 	if err := os.RemoveAll(extractDir); err != nil {
 		return fmt.Errorf("error cleaning extract dir: %w", err)
 	}
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return fmt.Errorf("error creating extract dir: %w", err)
 	}
 
@@ -947,19 +1040,26 @@ func prepareSystemUpdateTarFromKvmSystemZip(
 			zipUnverifiedPath := zipPath + ".unverified"
 			if _, err := os.Stat(zipUnverifiedPath); err != nil {
 				lastErr = fmt.Errorf("downloaded zip not found: %s: %w", zipUnverifiedPath, err)
-			} else {
-				if err := unzipArchive(zipUnverifiedPath, extractDir); err != nil {
+			} else if sigURL != "" || expectedHash != "" {
+				if err := verifyFile(ctx, zipPath, expectedHash, sigURL, verificationProgress, scopedLogger); err != nil {
+					lastErr = fmt.Errorf("system zip verification failed: %w", err)
+				} else if err := unzipArchive(zipUnverifiedPath, extractDir); err != nil {
 					lastErr = err
 				} else {
 					lastErr = nil
 					break
 				}
+			} else if err := unzipArchive(zipUnverifiedPath, extractDir); err != nil {
+				lastErr = err
+			} else {
+				lastErr = nil
+				break
 			}
 		}
 
 		_ = os.Remove(zipPath + ".unverified")
 		_ = os.RemoveAll(extractDir)
-		_ = os.MkdirAll(extractDir, 0755)
+		_ = os.MkdirAll(extractDir, 0o755)
 		if attempt < maxAttempts {
 			time.Sleep(time.Duration(attempt*2) * time.Second)
 		}
@@ -991,7 +1091,7 @@ func prepareSystemUpdateTarFromKvmSystemZip(
 	if _, err := os.Stat(scriptPath); err != nil {
 		return fmt.Errorf("split_and_check_md5.sh not found: %w", err)
 	}
-	if err := os.Chmod(scriptPath, 0755); err != nil {
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
 		return fmt.Errorf("error chmod split_and_check_md5.sh: %w", err)
 	}
 
@@ -1056,13 +1156,13 @@ func unzipArchive(zipPath string, destDir string) error {
 		}
 
 		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(cleanTargetPath, 0755); err != nil {
+			if err := os.MkdirAll(cleanTargetPath, 0o755); err != nil {
 				return fmt.Errorf("error creating dir: %w", err)
 			}
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(cleanTargetPath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(cleanTargetPath), 0o755); err != nil {
 			return fmt.Errorf("error creating dir: %w", err)
 		}
 
@@ -1071,7 +1171,7 @@ func unzipArchive(zipPath string, destDir string) error {
 			return fmt.Errorf("error opening zipped file: %w", err)
 		}
 
-		outFile, err := os.OpenFile(cleanTargetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+		outFile, err := os.OpenFile(cleanTargetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if err != nil {
 			rc.Close()
 			return fmt.Errorf("error creating file: %w", err)
@@ -1094,17 +1194,42 @@ func unzipArchive(zipPath string, destDir string) error {
 	return nil
 }
 
-func verifyFile(path string, expectedHash string, verifyProgress *float32, scopedLogger *zerolog.Logger) error {
+func verifyFile(ctx context.Context, path string, expectedHash string, sigURL string, verifyProgress *float32, scopedLogger *zerolog.Logger) error {
 	if scopedLogger == nil {
 		scopedLogger = otaLogger
 	}
 
 	unverifiedPath := path + ".unverified"
+
+	if strings.TrimSpace(sigURL) == "" && strings.TrimSpace(expectedHash) == "" {
+		return fmt.Errorf("refusing to flash unverified firmware: no signature URL and no hash provided")
+	}
+
+	if strings.TrimSpace(sigURL) != "" {
+		sigBasePath := path + ".sig"
+		sigDownloadErr := downloadFile(ctx, sigBasePath, sigURL, nil, nil)
+		sigPath := sigBasePath + ".unverified"
+		if sigDownloadErr != nil {
+			scopedLogger.Warn().Err(sigDownloadErr).Str("sigURL", sigURL).Msg("failed to download signature file, falling back to hash-only verification")
+		} else {
+			sigPresent, sigErr := verifyFileSignature(unverifiedPath, sigPath, scopedLogger)
+			_ = os.Remove(sigPath)
+			if sigPresent && sigErr != nil {
+				return fmt.Errorf("signature verification failed: %w", sigErr)
+			}
+			if sigPresent && sigErr == nil {
+				scopedLogger.Info().Str("path", path).Msg("firmware signature verified, proceeding to hash check")
+			}
+		}
+	} else {
+		scopedLogger.Info().Str("path", path).Msg("no signature URL provided, skipping signature verification")
+	}
+
 	if strings.TrimSpace(expectedHash) == "" {
 		if err := os.Rename(unverifiedPath, path); err != nil {
 			return fmt.Errorf("error renaming file: %w", err)
 		}
-		if err := os.Chmod(path, 0755); err != nil {
+		if err := os.Chmod(path, 0o755); err != nil {
 			return fmt.Errorf("error making file executable: %w", err)
 		}
 		return nil
@@ -1162,7 +1287,7 @@ func verifyFile(path string, expectedHash string, verifyProgress *float32, scope
 		return fmt.Errorf("error renaming file: %w", err)
 	}
 
-	if err := os.Chmod(path, 0755); err != nil {
+	if err := os.Chmod(path, 0o755); err != nil {
 		return fmt.Errorf("error making file executable: %w", err)
 	}
 
@@ -1175,19 +1300,23 @@ type OTAState struct {
 	MetadataFetchedAt          *time.Time `json:"metadataFetchedAt,omitempty"`
 	AppUpdatePending           bool       `json:"appUpdatePending"`
 	SystemUpdatePending        bool       `json:"systemUpdatePending"`
-	AppDownloadProgress        float32    `json:"appDownloadProgress,omitempty"` //TODO: implement for progress bar
+	AppDownloadProgress        float32    `json:"appDownloadProgress,omitempty"` // TODO: implement for progress bar
 	AppDownloadSpeedBps        float32    `json:"appDownloadSpeedBps"`
 	AppDownloadFinishedAt      *time.Time `json:"appDownloadFinishedAt,omitempty"`
-	SystemDownloadProgress     float32    `json:"systemDownloadProgress,omitempty"` //TODO: implement for progress bar
+	SystemDownloadProgress     float32    `json:"systemDownloadProgress,omitempty"` // TODO: implement for progress bar
 	SystemDownloadSpeedBps     float32    `json:"systemDownloadSpeedBps"`
 	SystemDownloadFinishedAt   *time.Time `json:"systemDownloadFinishedAt,omitempty"`
 	AppVerificationProgress    float32    `json:"appVerificationProgress,omitempty"`
 	AppVerifiedAt              *time.Time `json:"appVerifiedAt,omitempty"`
 	SystemVerificationProgress float32    `json:"systemVerificationProgress,omitempty"`
 	SystemVerifiedAt           *time.Time `json:"systemVerifiedAt,omitempty"`
-	AppUpdateProgress          float32    `json:"appUpdateProgress,omitempty"` //TODO: implement for progress bar
+	AppSignatureVerified       bool       `json:"appSignatureVerified,omitempty"`
+	SystemSignatureVerified    bool       `json:"systemSignatureVerified,omitempty"`
+	AppSignatureMissing        bool       `json:"appSignatureMissing,omitempty"`
+	SystemSignatureMissing     bool       `json:"systemSignatureMissing,omitempty"`
+	AppUpdateProgress          float32    `json:"appUpdateProgress,omitempty"` // TODO: implement for progress bar
 	AppUpdatedAt               *time.Time `json:"appUpdatedAt,omitempty"`
-	SystemUpdateProgress       float32    `json:"systemUpdateProgress,omitempty"` //TODO: port rk_ota, then implement
+	SystemUpdateProgress       float32    `json:"systemUpdateProgress,omitempty"` // TODO: port rk_ota, then implement
 	SystemUpdatedAt            *time.Time `json:"systemUpdatedAt,omitempty"`
 }
 
@@ -1206,7 +1335,12 @@ func triggerOTAStateUpdate() {
 func cleanupUpdateTempFiles(logger *zerolog.Logger) {
 	paths := []string{
 		"/userdata/picokvm/bin/kvm_app.unverified",
+		"/userdata/picokvm/bin/kvm_app.sig.unverified",
+		"/userdata/picokvm/update_system.zip.unverified",
+		"/userdata/picokvm/update_system.zip.sig.unverified",
+		"/userdata/picokvm/update_system.zip",
 		"/userdata/picokvm/update_system.tar.unverified",
+		"/userdata/picokvm/update_system.tar.sig.unverified",
 		"/userdata/picokvm/update_system.tar",
 		"/userdata/picokvm/kvm_system_work",
 	}
@@ -1222,10 +1356,32 @@ func cleanupUpdateTempFiles(logger *zerolog.Logger) {
 	}
 }
 
-func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) error {
+func cleanupLocalPackage() {
+	if err := os.RemoveAll(localPackageDir); err != nil && !os.IsNotExist(err) {
+		otaLogger.Warn().Err(err).Str("path", localPackageDir).Msg("failed to cleanup local package")
+	}
+}
+
+func cleanupStaleLocalPackageOnStartup() {
+	if _, err := os.Stat(localPackageDir); os.IsNotExist(err) {
+		return
+	} else if err != nil {
+		otaLogger.Warn().Err(err).Str("path", localPackageDir).Msg("failed to stat local package directory on startup")
+		return
+	}
+
+	otaLogger.Info().Str("path", localPackageDir).Msg("cleaning up stale local package on startup")
+	cleanupLocalPackage()
+}
+
+func TryUpdate(ctx context.Context, deviceId string) error {
+	if !otaUploadMutex.TryLock() {
+		return fmt.Errorf("upload in progress, cannot start update")
+	}
+	otaUploadMutex.Unlock()
+
 	scopedLogger := otaLogger.With().
 		Str("deviceId", deviceId).
-		Str("includePreRelease", fmt.Sprintf("%v", includePreRelease)).
 		Logger()
 
 	scopedLogger.Info().Msg("Trying to update...")
@@ -1245,7 +1401,12 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 		triggerOTAStateUpdate()
 	}()
 
-	updateStatus, err := GetUpdateStatus(ctx, deviceId, includePreRelease)
+	// Check for local update
+	if updateSource == updateSourceLocal {
+		return tryLocalUpdate(ctx, &scopedLogger)
+	}
+
+	updateStatus, err := GetUpdateStatus(ctx, deviceId)
 	if err != nil {
 		otaState.Error = fmt.Sprintf("Error checking for updates: %v", err)
 		scopedLogger.Error().Err(err).Msg("Error checking for updates")
@@ -1290,8 +1451,10 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 		triggerOTAStateUpdate()
 
 		err = verifyFile(
+			ctx,
 			"/userdata/picokvm/bin/kvm_app",
 			remote.AppHash,
+			remote.AppSigUrl,
 			&otaState.AppVerificationProgress,
 			&scopedLogger,
 		)
@@ -1304,6 +1467,7 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 		verifyFinished := time.Now()
 		otaState.AppVerifiedAt = &verifyFinished
 		otaState.AppVerificationProgress = 1
+		otaState.AppSignatureVerified = strings.TrimSpace(remote.AppSigUrl) != ""
 		otaState.AppUpdatedAt = &verifyFinished
 		otaState.AppUpdateProgress = 1
 		triggerOTAStateUpdate()
@@ -1329,6 +1493,8 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 				&otaState.SystemDownloadProgress,
 				&otaState.SystemDownloadSpeedBps,
 				&otaState.SystemVerificationProgress,
+				remote.SystemSigUrl,
+				remote.SystemHash,
 				&scopedLogger,
 			)
 			if err != nil {
@@ -1353,7 +1519,7 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 				return err
 			}
 
-			err = verifyFile(systemZipPath, remote.SystemHash, &otaState.SystemVerificationProgress, &scopedLogger)
+			err = verifyFile(ctx, systemZipPath, remote.SystemHash, remote.SystemSigUrl, &otaState.SystemVerificationProgress, &scopedLogger)
 			if err != nil {
 				otaState.Error = fmt.Sprintf("Error preparing system update archive: %v", err)
 				scopedLogger.Error().Err(err).Msg("Error preparing system update archive")
@@ -1377,6 +1543,7 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 		verifyFinished := time.Now()
 		otaState.SystemVerifiedAt = &verifyFinished
 		otaState.SystemVerificationProgress = 1
+		otaState.SystemSignatureVerified = strings.TrimSpace(remote.SystemSigUrl) != ""
 		triggerOTAStateUpdate()
 
 		scopedLogger.Info().Msg("Starting rk_ota command")
@@ -1446,13 +1613,7 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 	}
 
 	if rebootNeeded {
-		configPath := "/userdata/kvm_config.json"
-		if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
-			scopedLogger.Warn().Err(err).Str("path", configPath).Msg("failed to delete config before reboot")
-		} else {
-			scopedLogger.Info().Str("path", configPath).Msg("deleted config before reboot")
-		}
-
+		cleanupUpdateTempFiles(&scopedLogger)
 		scopedLogger.Info().Msg("System Rebooting in 10s")
 		time.Sleep(10 * time.Second)
 		cmd := exec.Command("reboot")
@@ -1469,7 +1630,7 @@ func TryUpdate(ctx context.Context, deviceId string, includePreRelease bool) err
 	return nil
 }
 
-func GetUpdateStatus(ctx context.Context, deviceId string, includePreRelease bool) (*UpdateStatus, error) {
+func GetUpdateStatus(ctx context.Context, deviceId string) (*UpdateStatus, error) {
 	updateStatus := &UpdateStatus{}
 
 	// Get local versions
@@ -1483,7 +1644,7 @@ func GetUpdateStatus(ctx context.Context, deviceId string, includePreRelease boo
 	}
 
 	// Get remote metadata
-	remoteMetadata, err := fetchUpdateMetadata(ctx, deviceId, includePreRelease)
+	remoteMetadata, err := fetchUpdateMetadata(ctx, deviceId)
 	if err != nil {
 		return updateStatus, fmt.Errorf("error checking for updates: %w", err)
 	}
@@ -1502,16 +1663,8 @@ func GetUpdateStatus(ctx context.Context, deviceId string, includePreRelease boo
 	updateStatus.SystemUpdateAvailable = systemVersionRemote.GreaterThan(systemVersionLocal)
 	updateStatus.AppUpdateAvailable = appVersionRemote.GreaterThan(appVersionLocal)
 
-	// Handle pre-release updates
-	isRemoteSystemPreRelease := systemVersionRemote.Prerelease() != ""
-	isRemoteAppPreRelease := appVersionRemote.Prerelease() != ""
-
-	if isRemoteSystemPreRelease && !includePreRelease {
-		updateStatus.SystemUpdateAvailable = false
-	}
-	if isRemoteAppPreRelease && !includePreRelease {
-		updateStatus.AppUpdateAvailable = false
-	}
+	updateStatus.AppSignatureMissing = strings.TrimSpace(remoteMetadata.AppSigUrl) == ""
+	updateStatus.SystemSignatureMissing = strings.TrimSpace(remoteMetadata.SystemSigUrl) == ""
 
 	return updateStatus, nil
 }
@@ -1526,4 +1679,605 @@ func confirmCurrentSystem() {
 	if err != nil {
 		logger.Warn().Str("output", string(output)).Msg("failed to set current partition in A/B setup")
 	}
+}
+
+func getOTAPublicKey() ed25519.PublicKey {
+	keyStr := strings.TrimSpace(builtOtaPublicKey)
+	if keyStr == "" {
+		return nil
+	}
+	keyBytes, err := hex.DecodeString(keyStr)
+	if err != nil {
+		otaLogger.Warn().Err(err).Msg("invalid OTA public key hex in binary")
+		return nil
+	}
+	if len(keyBytes) != ed25519.PublicKeySize {
+		otaLogger.Warn().Int("size", len(keyBytes)).Msg("OTA public key wrong size, expected 32 bytes")
+		return nil
+	}
+	return ed25519.PublicKey(keyBytes)
+}
+
+func hashFileSHA256(filePath string) ([32]byte, error) {
+	var fileHash [32]byte
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fileHash, fmt.Errorf("error opening file for hashing: %w", err)
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	buf := make([]byte, 32*1024)
+	if _, err := io.CopyBuffer(hasher, file, buf); err != nil {
+		return fileHash, fmt.Errorf("error hashing file: %w", err)
+	}
+
+	sum := hasher.Sum(nil)
+	copy(fileHash[:], sum)
+	return fileHash, nil
+}
+
+func verifyFileSignature(
+	unverifiedPath string,
+	sigPath string,
+	scopedLogger *zerolog.Logger,
+) (signaturePresent bool, err error) {
+	if scopedLogger == nil {
+		scopedLogger = otaLogger
+	}
+
+	if _, err := os.Stat(sigPath); os.IsNotExist(err) {
+		scopedLogger.Info().Str("path", sigPath).Msg("signature file not found, skipping signature verification")
+		return false, nil
+	}
+
+	sigBytes, err := os.ReadFile(sigPath)
+	if err != nil {
+		return true, fmt.Errorf("error reading signature file: %w", err)
+	}
+
+	if len(sigBytes) != ed25519.SignatureSize {
+		return true, fmt.Errorf("invalid signature file size: got %d bytes, expected %d", len(sigBytes), ed25519.SignatureSize)
+	}
+
+	publicKey := getOTAPublicKey()
+	if publicKey == nil {
+		return true, fmt.Errorf("signature present but no public key embedded in binary")
+	}
+
+	fileHash, err := hashFileSHA256(unverifiedPath)
+	if err != nil {
+		return true, err
+	}
+	if !ed25519.Verify(publicKey, fileHash[:], sigBytes) {
+		return true, fmt.Errorf("Ed25519 signature verification failed for %s", unverifiedPath)
+	}
+
+	scopedLogger.Info().Str("path", unverifiedPath).Msg("Ed25519 signature verification passed")
+	return true, nil
+}
+
+func isSigFileAbsent(sigPath string) bool {
+	_, err := os.Stat(sigPath)
+	return os.IsNotExist(err)
+}
+
+func verifyLocalFileSignature(filePath string, sigPath string, publicKey ed25519.PublicKey) bool {
+	sigBytes, err := os.ReadFile(sigPath)
+	if err != nil {
+		return false
+	}
+	if len(sigBytes) != ed25519.SignatureSize {
+		return false
+	}
+
+	fileHash, err := hashFileSHA256(filePath)
+	if err != nil {
+		return false
+	}
+
+	return ed25519.Verify(publicKey, fileHash[:], sigBytes)
+}
+
+type SignatureUpdateResult struct {
+	AppSignatureUpdated    bool   `json:"appSignatureUpdated"`
+	SystemSignatureUpdated bool   `json:"systemSignatureUpdated"`
+	AppSignatureValid      bool   `json:"appSignatureValid"`
+	SystemSignatureValid   bool   `json:"systemSignatureValid"`
+	Error                  string `json:"error,omitempty"`
+}
+
+func UpdateSignatures(ctx context.Context) (*SignatureUpdateResult, error) {
+	result := &SignatureUpdateResult{}
+
+	remoteMetadata, err := fetchUpdateMetadata(ctx, "")
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to fetch remote metadata: %v", err)
+		return result, fmt.Errorf("failed to fetch remote metadata: %w", err)
+	}
+
+	publicKey := getOTAPublicKey()
+
+	appBinPath := "/userdata/picokvm/bin/kvm_app"
+	appSigPath := appBinPath + ".sig"
+
+	if strings.TrimSpace(remoteMetadata.AppSigUrl) != "" {
+		err := downloadFile(ctx, appSigPath, remoteMetadata.AppSigUrl, nil, nil)
+		if err != nil {
+			result.Error = fmt.Sprintf("failed to download app signature: %v", err)
+			return result, fmt.Errorf("failed to download app signature: %w", err)
+		}
+		result.AppSignatureUpdated = true
+
+		sigUnverified := appSigPath + ".unverified"
+		if _, statErr := os.Stat(sigUnverified); statErr == nil {
+			_ = os.Remove(appSigPath)
+			if renameErr := os.Rename(sigUnverified, appSigPath); renameErr != nil {
+				result.Error = fmt.Sprintf("failed to rename app signature: %v", renameErr)
+				return result, fmt.Errorf("failed to rename app signature: %w", renameErr)
+			}
+		}
+
+		if publicKey != nil {
+			result.AppSignatureValid = verifyLocalFileSignature(appBinPath, appSigPath, publicKey)
+		}
+	}
+
+	return result, nil
+}
+
+// Stream multipart uploads directly to persistent storage to avoid /tmp temp files on low-memory devices.
+func streamMultipartUploadToFile(r *http.Request, fieldName string, targetPath string, validateFilename func(string) error) (string, int64, int, error) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return "", 0, http.StatusBadRequest, fmt.Errorf("invalid multipart upload: %w", err)
+	}
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", 0, http.StatusBadRequest, fmt.Errorf("failed to read upload stream: %w", err)
+		}
+
+		if part.FormName() != fieldName || part.FileName() == "" {
+			_, _ = io.Copy(io.Discard, part)
+			_ = part.Close()
+			continue
+		}
+
+		filename := part.FileName()
+		if validateFilename != nil {
+			if err := validateFilename(filename); err != nil {
+				_ = part.Close()
+				return filename, 0, http.StatusBadRequest, err
+			}
+		}
+
+		out, err := os.Create(targetPath)
+		if err != nil {
+			_ = part.Close()
+			return filename, 0, http.StatusInternalServerError, fmt.Errorf("failed to create target file: %w", err)
+		}
+
+		written, copyErr := io.Copy(out, part)
+		closeErr := out.Close()
+		_ = part.Close()
+		if copyErr != nil {
+			_ = os.Remove(targetPath)
+			return filename, written, http.StatusInternalServerError, fmt.Errorf("failed to save file: %w", copyErr)
+		}
+		if closeErr != nil {
+			_ = os.Remove(targetPath)
+			return filename, written, http.StatusInternalServerError, fmt.Errorf("failed to finalize file: %w", closeErr)
+		}
+
+		return filename, written, http.StatusOK, nil
+	}
+
+	return "", 0, http.StatusBadRequest, fmt.Errorf("no file uploaded")
+}
+
+func handleOTAUploadHttp(c *gin.Context) {
+	otaUploadMutex.Lock()
+	defer otaUploadMutex.Unlock()
+
+	updateType := c.Query("type")
+	if updateType != "app" && updateType != "system" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid type parameter, must be 'app' or 'system'"})
+		return
+	}
+
+	// Check if update is in progress
+	if otaState.Updating {
+		c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
+		return
+	}
+
+	// Create upload directory if it doesn't exist
+	uploadDir := "/userdata/picokvm/ota_uploads"
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create upload directory"})
+		return
+	}
+
+	// Determine target filename
+	var targetFilename string
+	if updateType == "app" {
+		targetFilename = "kvm_app.zip"
+	} else {
+		targetFilename = "update_system.tar"
+	}
+	targetPath := filepath.Join(uploadDir, targetFilename)
+
+	// Stream the uploaded file directly to persistent storage.
+	_, written, statusCode, err := streamMultipartUploadToFile(c.Request, "file", targetPath, func(filename string) error {
+		lowerName := strings.ToLower(filename)
+		if updateType == "app" && !strings.HasSuffix(lowerName, ".zip") {
+			return fmt.Errorf("app firmware must be a .zip file")
+		}
+		if updateType == "system" && !strings.HasSuffix(lowerName, ".tar") {
+			return fmt.Errorf("system firmware must be a .tar file")
+		}
+		return nil
+	})
+	if err != nil {
+		_ = os.Remove(targetPath)
+		c.JSON(statusCode, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Verify file content
+	if updateType == "app" {
+		// Verify zip contains kvm_app binary
+		if err := verifyAppZipContent(targetPath); err != nil {
+			os.Remove(targetPath)
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid app firmware: %v", err)})
+			return
+		}
+	} else {
+		// Verify tar is valid
+		if err := verifySystemTarContent(targetPath); err != nil {
+			os.Remove(targetPath)
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid system firmware: %v", err)})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Upload completed",
+		"filePath": targetPath,
+		"size":     written,
+	})
+}
+
+func handleLocalPackageUploadHttp(c *gin.Context) {
+	otaUploadMutex.Lock()
+	defer otaUploadMutex.Unlock()
+
+	// Check if update is in progress
+	if otaState.Updating {
+		c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
+		return
+	}
+
+	// Clean up any existing package
+	cleanupLocalPackage()
+
+	// Create temp directory
+	if err := os.MkdirAll(localPackageDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create temp directory"})
+		return
+	}
+
+	// Save ZIP file
+	zipPath := filepath.Join(localPackageDir, "pkg.zip")
+	_, _, statusCode, err := streamMultipartUploadToFile(c.Request, "file", zipPath, func(filename string) error {
+		if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
+			return fmt.Errorf("file must be a .zip archive")
+		}
+		return nil
+	})
+	if err != nil {
+		cleanupLocalPackage()
+		c.JSON(statusCode, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Extract ZIP
+	if err := unzipArchive(zipPath, localPackageDir); err != nil {
+		cleanupLocalPackage()
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to extract ZIP: %v", err)})
+		return
+	}
+
+	// Remove the uploaded archive after extraction to reduce peak storage usage.
+	if err := os.Remove(zipPath); err != nil && !os.IsNotExist(err) {
+		otaLogger.Warn().Err(err).Str("path", zipPath).Msg("failed to remove uploaded local package archive")
+	}
+
+	// Validate version.txt exists
+	versionPath := filepath.Join(localPackageDir, "version.txt")
+	if _, err := os.Stat(versionPath); os.IsNotExist(err) {
+		cleanupLocalPackage()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid package: version.txt not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func verifyAppZipContent(zipPath string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if f.Name == "kvm_app" || f.Name == "kvm_app.exe" {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("kvm_app binary not found in zip")
+}
+
+func verifySystemTarContent(tarPath string) error {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("failed to open tar: %w", err)
+	}
+	defer f.Close()
+
+	// Try to read tar header
+	tr := tar.NewReader(f)
+	_, err = tr.Next()
+	if err != nil {
+		return fmt.Errorf("invalid tar file: %w", err)
+	}
+
+	return nil
+}
+
+func tryLocalUpdate(ctx context.Context, scopedLogger *zerolog.Logger) error {
+	pkgDir := localPackageDir
+
+	// Get package info
+	info, err := GetLocalPackageInfo()
+	if err != nil {
+		return fmt.Errorf("failed to get package info: %w", err)
+	}
+
+	scopedLogger.Info().
+		Str("appVersion", info.AppVersion).
+		Str("systemVersion", info.SystemVersion).
+		Bool("hasApp", info.HasApp).
+		Bool("hasSystem", info.HasSystem).
+		Msg("Local package info")
+
+	// Process App update
+	if info.HasApp {
+		appPath := filepath.Join(pkgDir, "kvm_app")
+		scopedLogger.Info().Str("path", appPath).Msg("Processing local app update")
+
+		otaState.AppUpdatePending = true
+		triggerOTAStateUpdate()
+
+		appBinPath := "/userdata/picokvm/bin/kvm_app"
+		appBinUnverifiedPath := appBinPath + ".unverified"
+
+		// Stage the new binary at a temporary path before atomically replacing the running app.
+		if err := copyFile(appPath, appBinUnverifiedPath); err != nil {
+			otaState.Error = fmt.Sprintf("Failed to copy app: %v", err)
+			triggerOTAStateUpdate()
+			return err
+		}
+
+		if err := os.Chmod(appBinUnverifiedPath, 0o755); err != nil {
+			otaState.Error = fmt.Sprintf("Failed to chmod app: %v", err)
+			triggerOTAStateUpdate()
+			return err
+		}
+
+		otaState.AppDownloadProgress = 1
+		triggerOTAStateUpdate()
+
+		// Verify hash if sha256 file exists
+		hashPath := filepath.Join(pkgDir, "kvm_app.sha256")
+		if _, err := os.Stat(hashPath); err == nil {
+			if err := verifyLocalPackageHash(appBinUnverifiedPath, hashPath, scopedLogger); err != nil {
+				otaState.Error = fmt.Sprintf("Failed to verify app hash: %v", err)
+				triggerOTAStateUpdate()
+				return err
+			}
+		}
+
+		otaState.AppVerificationProgress = 1
+		now := time.Now()
+		otaState.AppVerifiedAt = &now
+		triggerOTAStateUpdate()
+
+		if err := os.Rename(appBinUnverifiedPath, appBinPath); err != nil {
+			otaState.Error = fmt.Sprintf("Failed to finalize app update: %v", err)
+			triggerOTAStateUpdate()
+			return err
+		}
+
+		otaState.AppUpdatedAt = &now
+		otaState.AppUpdateProgress = 1
+		triggerOTAStateUpdate()
+	}
+
+	// Process System update
+	if info.HasSystem {
+		systemPath := filepath.Join(pkgDir, "update_system.zip")
+		scopedLogger.Info().Str("path", systemPath).Msg("Processing local system update")
+
+		otaState.SystemUpdatePending = true
+		triggerOTAStateUpdate()
+
+		systemTarPath := "/userdata/picokvm/update_system.tar"
+		systemTarUnverifiedPath := systemTarPath + ".unverified"
+
+		// Extract the tarball to a temporary path first, matching the remote update flow.
+		if err := extractUpdateSystemTarFromZip(systemPath, systemTarUnverifiedPath); err != nil {
+			otaState.Error = fmt.Sprintf("Failed to extract system update: %v", err)
+			triggerOTAStateUpdate()
+			return err
+		}
+
+		otaState.SystemDownloadProgress = 1
+		triggerOTAStateUpdate()
+
+		// Verify hash if sha256 file exists
+		hashPath := filepath.Join(pkgDir, "update_system.zip.sha256")
+		if _, err := os.Stat(hashPath); err == nil {
+			if err := verifyLocalPackageHash(systemPath, hashPath, scopedLogger); err != nil {
+				otaState.Error = fmt.Sprintf("Failed to verify system hash: %v", err)
+				triggerOTAStateUpdate()
+				return err
+			}
+		}
+
+		otaState.SystemVerificationProgress = 1
+		now := time.Now()
+		otaState.SystemVerifiedAt = &now
+		triggerOTAStateUpdate()
+
+		if err := os.Rename(systemTarUnverifiedPath, systemTarPath); err != nil {
+			otaState.Error = fmt.Sprintf("Failed to finalize system update: %v", err)
+			triggerOTAStateUpdate()
+			return err
+		}
+
+		// Run rk_ota
+		scopedLogger.Info().Msg("Starting rk_ota command")
+		cmd := exec.Command("rk_ota", "--misc=update", "--tar_path="+systemTarPath, "--save_dir=/userdata/picokvm/ota_save", "--partition=all")
+		var b bytes.Buffer
+		cmd.Stdout = &b
+		cmd.Stderr = &b
+		err = cmd.Run()
+		if err != nil {
+			output := b.String()
+			otaState.Error = fmt.Sprintf("Error executing rk_ota: %v\nOutput: %s", err, output)
+			triggerOTAStateUpdate()
+			return fmt.Errorf("error executing rk_ota: %w\nOutput: %s", err, output)
+		}
+
+		now = time.Now()
+		otaState.SystemUpdatedAt = &now
+		otaState.SystemUpdateProgress = 1
+		triggerOTAStateUpdate()
+	}
+
+	// Clean up local package
+	cleanupLocalPackage()
+
+	// Reboot
+	scopedLogger.Info().Msg("Local update completed, rebooting in 10s")
+	time.Sleep(10 * time.Second)
+	rebootCmd := exec.Command("reboot")
+	if err := rebootCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start reboot: %w", err)
+	}
+	os.Exit(0)
+	return nil
+}
+
+func extractAppFromZip(zipPath string, targetPath string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if f.Name == "kvm_app" || f.Name == "kvm_app.exe" {
+			rc, err := f.Open()
+			if err != nil {
+				return fmt.Errorf("failed to open kvm_app in zip: %w", err)
+			}
+			defer rc.Close()
+
+			// Create temp file first
+			tmpPath := targetPath + ".tmp"
+			out, err := os.Create(tmpPath)
+			if err != nil {
+				return fmt.Errorf("failed to create temp file: %w", err)
+			}
+
+			if _, err := io.Copy(out, rc); err != nil {
+				out.Close()
+				os.Remove(tmpPath)
+				return fmt.Errorf("failed to extract kvm_app: %w", err)
+			}
+			out.Close()
+
+			// Make executable
+			if err := os.Chmod(tmpPath, 0o755); err != nil {
+				os.Remove(tmpPath)
+				return fmt.Errorf("failed to chmod: %w", err)
+			}
+
+			// Replace existing file
+			if err := os.Rename(tmpPath, targetPath); err != nil {
+				os.Remove(tmpPath)
+				return fmt.Errorf("failed to replace file: %w", err)
+			}
+
+			return nil
+		}
+	}
+
+	return fmt.Errorf("kvm_app not found in zip")
+}
+
+func calculateFileSHA256(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func verifyLocalPackageHash(filePath string, hashFilePath string, scopedLogger *zerolog.Logger) error {
+	hashFileBytes, err := os.ReadFile(hashFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read hash file: %w", err)
+	}
+
+	expectedHash, err := parseSHA256Text(string(hashFileBytes))
+	if err != nil {
+		return fmt.Errorf("failed to parse hash file: %w", err)
+	}
+
+	actualHash, err := calculateFileSHA256(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to calculate file hash: %w", err)
+	}
+
+	if scopedLogger != nil {
+		scopedLogger.Info().
+			Str("path", filePath).
+			Str("expectedHash", expectedHash).
+			Str("actualHash", actualHash).
+			Msg("Verified local package hash")
+	}
+
+	if actualHash != expectedHash {
+		return fmt.Errorf("hash mismatch: %s != %s", actualHash, expectedHash)
+	}
+
+	return nil
 }

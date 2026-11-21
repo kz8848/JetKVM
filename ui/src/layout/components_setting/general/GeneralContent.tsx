@@ -3,10 +3,9 @@ import { Select } from "antd";
 import {useReactAt} from 'i18n-auto-extractor/react'
 import { isMobile } from "react-device-detect";
 
-import { useJsonRpc } from "@/hooks/useJsonRpc";
 import { SettingsPageHeader } from "@components/Settings/SettingsPageheader";
-import notifications from "@/notifications";
 import { useSettingsStore } from "@/hooks/stores";
+import type { FullscreenMode } from "@/hooks/stores";
 import { SettingsItem } from "@components/Settings/SettingsView";
 import enJSON from '@/locales/en.json';
 import zhJSON from '@/locales/zh.json';
@@ -17,8 +16,6 @@ const { Option } = Select;
 
 
 export default function SettingsGeneral() {
-  const [send] = useJsonRpc();
-  const [autoUpdate, setAutoUpdate] = useState(true);
   const { $at, setCurrentLang } = useReactAt();
 
   // Theme and Language State
@@ -26,13 +23,12 @@ export default function SettingsGeneral() {
   const { setThemeMode } = useTheme();
   const language = useSettingsStore(state => state.language);
   const setLanguage = useSettingsStore(state => state.setLanguage);
+  const fullscreenMode = useSettingsStore(state => state.fullscreenMode);
+  const setFullscreenMode = useSettingsStore(state => state.setFullscreenMode);
 
-  useEffect(() => {
-    send("getAutoUpdateState", {}, resp => {
-      if ("error" in resp) return;
-      setAutoUpdate(resp.result as boolean);
-    });
-  }, [send]);
+  const handleFullscreenModeChange = (value: string) => {
+    setFullscreenMode(value as FullscreenMode);
+  };
 
   // Language Change Handler
   const handleLanguageChange = (value: string) => {
@@ -109,6 +105,27 @@ export default function SettingsGeneral() {
             >
               <Option value="en" className={dark_font_style}>{$at('English')}</Option>
               <Option value="zh" className={dark_font_style}>{$at('中文')}</Option>
+            </Select>
+          </div>
+        </SettingsItem>
+      </div>
+
+      <div className="space-y-4">
+        <SettingsItem
+          title={$at("Fullscreen Mode")}
+          description={$at(
+            "Choose how the fullscreen button behaves. Full page fullscreen is not supported on iOS, use Video Only there.",
+          )}
+          className={`${isMobile ? "w-full flex-col" : ""}`}
+        >
+          <div className={`space-y-2 ${isMobile ? "w-full" : "w-[37%]"}`}>
+            <Select
+              value={fullscreenMode}
+              onChange={handleFullscreenModeChange}
+              className={`!w-full !h-[36px]`}
+            >
+              <Option value="page" className={dark_font_style}>{$at('Whole Page')}</Option>
+              <Option value="video" className={dark_font_style}>{$at('Video Only')}</Option>
             </Select>
           </div>
         </SettingsItem>

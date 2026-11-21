@@ -10,6 +10,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/gwatts/rootcerts"
+	"kvm/internal/mcp"
 )
 
 var appCtx context.Context
@@ -17,6 +18,25 @@ var appCtx context.Context
 func Main() {
 	SyncConfigSD(true)
 	LoadConfig()
+	cleanupStaleLocalPackageOnStartup()
+
+	if config.APIKey == "" {
+		key, err := generateAPIKey()
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to generate API key")
+		} else {
+			config.APIKey = key
+			if err := SaveConfig(); err != nil {
+				logger.Warn().Err(err).Msg("failed to save API key to config")
+			} else {
+				logger.Info().Msg("generated new API key")
+			}
+		}
+	}
+
+	// Seed the MCP live state early: the server itself starts in a goroutine, but
+	// the management API can be queried before that.
+	initMCP()
 
 	var cancel context.CancelFunc
 	appCtx, cancel = context.WithCancel(context.Background())
@@ -35,7 +55,6 @@ func Main() {
 		Interface("app_version", appVersionLocal).
 		Msg("starting KVM")
 
-	go watchAdcKeysLongPressReset(appCtx)
 	go runWatchdog()
 	go confirmCurrentSystem() //A/B system
 	if isNewEnoughSystem {
@@ -147,11 +166,12 @@ func Main() {
 		if err := initImagesFolder(); err != nil {
 			logger.Warn().Err(err).Msg("failed to init images folder")
 		}
+		remountPersistedVirtualMediaState()
 		initJiggler()
 
 		initSystemInfo()
+		initAutoMountImage()
 	}
-
 	// initialize GPIO
 	initGPIO()
 
@@ -161,29 +181,16 @@ func Main() {
 	// Initialize VPN
 	initVPN()
 
-	//Auto update
-	//go func() {
-	//	time.Sleep(15 * time.Minute)
-	//	for {
-	//		logger.Debug().Bool("auto_update_enabled", config.AutoUpdateEnabled).Msg("UPDATING")
-	//		if !config.AutoUpdateEnabled {
-	//			return
-	//		}
-	//		if currentSession != nil {
-	//			logger.Debug().Msg("skipping update since a session is active")
-	//			time.Sleep(1 * time.Minute)
-	//			continue
-	//		}
-	//		includePreRelease := config.IncludePreRelease
-	//		err = TryUpdate(context.Background(), GetDeviceID(), includePreRelease)
-	//		if err != nil {
-	//			logger.Warn().Err(err).Msg("failed to auto update")
-	//		}
-	//		time.Sleep(1 * time.Hour)
-	//	}
-	//}()
-	//go RunFuseServer()
 	go RunWebServer()
+
+	// Local CLI API (unix socket, no auth) and the MCP server (API key auth)
+	go func() {
+		StartAPIServer(cliAPISocketPath)
+	}()
+
+	go func() {
+		mcp.Start(mcp.DefaultPort, false)
+	}()
 
 	go RunWebSecureServer()
 	// Web secure server is started only if TLS mode is enabled

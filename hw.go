@@ -59,7 +59,7 @@ func GetDefaultHostname() string {
 	//}
 
 	//return fmt.Sprintf("kvm-%s", strings.ToLower(deviceId))
-	return "jetkvm"
+	return "picokvm"
 }
 
 func GetHostname() string {

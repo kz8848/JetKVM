@@ -1,6 +1,8 @@
-import { KeyCombo } from "../keyboardLayouts"
+import { KeyboardLayout, KeyCombo } from "../keyboardLayouts"
+import { modifierDisplayMap, keyDisplayMap, virtualKeyboard } from "./en_US"
 
-export const name = "Italiano";
+const name = "Italiano";
+const isoCode = "it-IT";
 
 export const chars = {
   A: { key: "KeyA", shift: true },
@@ -111,3 +113,20 @@ export const chars = {
   Enter: { key: "Enter" },
   Tab: { key: "Tab" },
 } as Record<string, KeyCombo>;
+
+// The ISO extra key left of Z prints < and > on this layout; the shared map only
+// knows the UK spelling.
+const it_IT_keyDisplayMap = {
+  ...keyDisplayMap,
+  IntlBackslash: "<",
+  "(IntlBackslash)": ">",
+};
+
+export const it_IT: KeyboardLayout = {
+  isoCode,
+  name,
+  chars,
+  keyDisplayMap: it_IT_keyDisplayMap,
+  modifierDisplayMap,
+  virtualKeyboard,
+};

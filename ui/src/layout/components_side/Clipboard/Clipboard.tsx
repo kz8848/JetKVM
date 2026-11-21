@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExclamationCircleIcon } from "@heroicons/react/16/solid";
 import { useClose } from "@headlessui/react";
-import { Checkbox, Button } from "antd";
+import { Checkbox, Button, Input } from "antd";
 import { useReactAt } from "i18n-auto-extractor/react";
 import { isMobile } from "react-device-detect";
 
 import { TextAreaWithLabel } from "@components/TextArea";
+import { SettingsItem } from "@components/Settings/SettingsView";
 import { useJsonRpc } from "@/hooks/useJsonRpc";
-import { useHidStore, useRTCStore, useUiStore, useSettingsStore } from "@/hooks/stores";
+import { useHidStore, useRTCStore, useUiStore, useSettingsStore, useVideoStore } from "@/hooks/stores";
 import { keys, modifiers } from "@/keyboardMappings";
-import { layouts, chars } from "@/keyboardLayouts";
+import { layouts, chars, resolveKeyboardLayoutKey } from "@/keyboardLayouts";
 import notifications from "@/notifications";
+import { eventMatchesShortcut, shortcutFromKeyboardEvent } from "@/utils/shortcuts";
 
 const hidKeyboardPayload = (keys: number[], modifier: number) => {
   return { keys, modifier };
@@ -28,15 +30,24 @@ export default function Clipboard() {
   const setDisableVideoFocusTrap = useUiStore(state => state.setDisableVideoFocusTrap);
   const setSidebarView = useUiStore(state => state.setSidebarView);
   const toggleTopBarView = useUiStore(state => state.toggleTopBarView);
+  const isOcrMode = useUiStore(state => state.isOcrMode);
+  const setOcrMode = useUiStore(state => state.setOcrMode);
   const isReinitializingGadget = useHidStore(state => state.isReinitializingGadget);
+  const videoWidth = useVideoStore(state => state.width);
+  const videoHeight = useVideoStore(state => state.height);
   const [send] = useJsonRpc();
   const rpcDataChannel = useRTCStore(state => state.rpcDataChannel);
 
   const [invalidChars, setInvalidChars] = useState<string[]>([]);
   const close = useClose();
-  const overrideCtrlV = useSettingsStore(state => state.overrideCtrlV);
-  const setOverrideCtrlV = useSettingsStore(state => state.setOverrideCtrlV);
-  const [pasteBuffer, setPasteBuffer] = useState<string>("");
+  const pasteShortcutEnabled = useSettingsStore(state => state.pasteShortcutEnabled);
+  const setPasteShortcutEnabled = useSettingsStore(state => state.setPasteShortcutEnabled);
+  const pasteShortcut = useSettingsStore(state => state.pasteShortcut);
+  const setPasteShortcut = useSettingsStore(state => state.setPasteShortcut);
+  const ocrShortcutEnabled = useSettingsStore(state => state.ocrShortcutEnabled);
+  const setOcrShortcutEnabled = useSettingsStore(state => state.setOcrShortcutEnabled);
+  const ocrShortcut = useSettingsStore(state => state.ocrShortcut);
+  const setOcrShortcut = useSettingsStore(state => state.setOcrShortcut);
   const [readyToRender, setReadyToRender] = useState(false);
 
   useEffect(() => {
@@ -54,9 +65,7 @@ export default function Clipboard() {
 
   // this ensures we always get the original en_US if it hasn't been set yet
   const safeKeyboardLayout = useMemo(() => {
-    if (keyboardLayout && keyboardLayout.length > 0)
-      return keyboardLayout;
-    return "en_US";
+    return resolveKeyboardLayoutKey(keyboardLayout) ?? "en_US";
   }, [keyboardLayout]);
 
   useEffect(() => {
@@ -127,7 +136,6 @@ export default function Clipboard() {
   }, [rpcDataChannel?.readyState, send, setDisableVideoFocusTrap, setPasteMode, safeKeyboardLayout]);
 
   const handleTextSend = useCallback(async (text: string) => {
-    setPasteBuffer(text);
     const segInvalid = [
       ...new Set(
         // @ts-expect-error TS doesn't recognize Intl.Segmenter in some environments
@@ -191,13 +199,31 @@ export default function Clipboard() {
     }
   }, [handleTextSend]);
 
-  useEffect(() => {
-    // When overrideCtrlV is true, we want to focus the container div to capture paste events
-    // When it is false, we want to focus the textarea if it exists
-    if (!overrideCtrlV && TextAreaRef.current) {
-      TextAreaRef.current.focus();
+
+  const handleShortcutInput = useCallback(
+    (setter: (shortcut: string) => void) => (e: React.KeyboardEvent<HTMLInputElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const shortcut = shortcutFromKeyboardEvent(e.nativeEvent);
+      if (!shortcut) return;
+      setter(shortcut);
+    },
+    [],
+  );
+
+  const handleOpenOcr = useCallback(() => {
+    if (videoWidth === 0 || videoHeight === 0) {
+      notifications.error($at("No video signal"));
+      return;
     }
-  }, [readyToRender, overrideCtrlV]);
+    setOcrMode(!isOcrMode);
+    close();
+    if (isMobile) {
+      toggleTopBarView("ClipboardMobile");
+    } else {
+      setSidebarView(null);
+    }
+  }, [videoWidth, videoHeight, $at, setOcrMode, isOcrMode, close, toggleTopBarView, setSidebarView]);
 
   return (
     <div className="space-y-4  py-3" >
@@ -205,32 +231,37 @@ export default function Clipboard() {
         <div className="h-full space-y-4">
           <div className="space-y-4">
 
-              <div className="flex items-center">
-                  <Checkbox
-                    checked={overrideCtrlV}
-                    onChange={e => setOverrideCtrlV(e.target.checked)}
-                  >
-                    {$at("Use Ctrl+V to paste clipboard to remote")}
-                  </Checkbox>
+              <div className="grid grid-cols-[minmax(0,1fr)_140px] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_180px]">
+                <Checkbox
+                  className="min-w-0"
+                  checked={pasteShortcutEnabled}
+                  onChange={e => setPasteShortcutEnabled(e.target.checked)}
+                >
+                  <span className="whitespace-normal break-words">
+                    {$at("Enable paste shortcut")}
+                  </span>
+                </Checkbox>
+                <Input
+                  size="small"
+                  value={pasteShortcut}
+                  onKeyDown={handleShortcutInput(setPasteShortcut)}
+                  onChange={() => void 0}
+                  className="w-full"
+                />
               </div>
 
               <div className="w-full px-1 outline-none"
-                   tabIndex={overrideCtrlV ? 0 : -1}
-                   ref={(el) => {
-                     if (el && overrideCtrlV && readyToRender) {
-                       el.focus();
-                     }
-                   }}
+                   tabIndex={pasteShortcutEnabled ? 0 : -1}
                    onKeyUp={e => e.stopPropagation()}
                    onKeyDown={e => {
                      e.stopPropagation();
-                     if (overrideCtrlV && (e.key.toLowerCase() === "v" || e.code === "KeyV") && (e.metaKey || e.ctrlKey)) {
+                     if (pasteShortcutEnabled && eventMatchesShortcut(e.nativeEvent, pasteShortcut)) {
                        e.preventDefault();
                        readClipboardToBufferAndSend();
                      }
                    }}
                    onPaste={e => {
-                     if (overrideCtrlV) {
+                     if (pasteShortcutEnabled) {
                        e.preventDefault();
                        const txt = e.clipboardData?.getData("text") || "";
                        if (txt) {
@@ -240,7 +271,7 @@ export default function Clipboard() {
                        }
                      }
                    }}>
-                {!overrideCtrlV && readyToRender && <TextAreaWithLabel
+                {!pasteShortcutEnabled && readyToRender && <TextAreaWithLabel
                   ref={TextAreaRef}
                   label={$at("Copy text from your client to the remote host")}
                   rows={4}
@@ -275,7 +306,7 @@ export default function Clipboard() {
                   }}
                 />}
 
-                {invalidChars.length > 0 && (
+                {!pasteShortcutEnabled && invalidChars.length > 0 && (
                   <div className="mt-2 flex items-center gap-x-2">
                     <ExclamationCircleIcon className="h-4 w-4 text-red-500 dark:text-red-400" />
                     <span className="text-xs text-red-500 dark:text-red-400">
@@ -295,32 +326,49 @@ export default function Clipboard() {
 
       </div>
       <div
-        className="flex animate-fadeIn opacity-0 items-center justify-start gap-x-2"
+        className="flex animate-fadeIn opacity-0 flex-col gap-y-2"
         style={{
           animationDuration: "0.7s",
           animationDelay: "0.2s",
         }}
       >
-
-        <Button
-
+        {!pasteShortcutEnabled && <Button
           type="primary"
-          className={isMobile ? "w-[49%]" : ""}
+          className="w-full"
           onClick={onConfirmPaste}
         >
-          {$at("Confirm paste")}</Button>
-        <Button
-          className={isMobile ? "w-[49%]" : ""}
-          onClick={() => {
-            onCancelPasteMode();
-            close();
-            if(isMobile){
-              toggleTopBarView("ClipboardMobile");
-            }else{
-              setSidebarView(null)
-            }
-          }}
-        >{$at("Cancel")}</Button>
+          {$at("Confirm paste")}</Button>}
+        <div className="grid grid-cols-[minmax(0,1fr)_140px] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_180px]">
+          <Checkbox
+            className="min-w-0"
+            checked={ocrShortcutEnabled}
+            onChange={e => setOcrShortcutEnabled(e.target.checked)}
+          >
+            <span className="whitespace-normal break-words">
+              {$at("Enable OCR shortcut")}
+            </span>
+          </Checkbox>
+          <Input
+            size="small"
+            value={ocrShortcut}
+            onKeyDown={handleShortcutInput(setOcrShortcut)}
+            onChange={() => void 0}
+            className="w-full"
+          />
+        </div>
+
+        <SettingsItem
+          title={$at("OCR")}
+          description={$at("Open OCR selection mode on the video area")}
+        >
+          <Button
+            type="primary"
+            className={`${isMobile ? "w-full" : ""}`}
+            onClick={handleOpenOcr}
+          >
+            {$at("Open")}
+          </Button>
+        </SettingsItem>
       </div>
     </div>
 

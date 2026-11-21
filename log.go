@@ -14,7 +14,6 @@ var (
 	logger          = logging.GetSubsystemLogger("kvm")
 	networkLogger   = logging.GetSubsystemLogger("network")
 	vpnLogger       = logging.GetSubsystemLogger("vpn")
-	cloudLogger     = logging.GetSubsystemLogger("cloud")
 	websocketLogger = logging.GetSubsystemLogger("websocket")
 	webrtcLogger    = logging.GetSubsystemLogger("webrtc")
 	videoLogger     = logging.GetSubsystemLogger("video")
@@ -30,7 +29,7 @@ var (
 	displayLogger   = logging.GetSubsystemLogger("display")
 	wolLogger       = logging.GetSubsystemLogger("wol")
 	usbLogger       = logging.GetSubsystemLogger("usb")
-	keysLogger      = logging.GetSubsystemLogger("keys")
+	hidRPCLogger    = logging.GetSubsystemLogger("hidrpc")
 	// external components
 	ginLogger = logging.GetSubsystemLogger("gin")
 )
