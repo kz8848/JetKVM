@@ -8,7 +8,7 @@ import Setting1Svg from "@assets/second/set1.svg?react";
 import ZhongDuanSvg from "@assets/second/zhongduan.svg?react";
 import ZhongDuanSvg2 from "@assets/second/zhongduan2.svg?react";
 
-import LogoLuckfox from "@assets/logo-luckfox.png";
+import LogoLuckfox from "@assets/logo-blue.svg";
 import { useHidStore, useUiStore } from "@/hooks/stores";
 import MacroTopBar from "@/layout/components_side/Macros/MacroTopBar";
 import { BarsPinButton } from "@/layout/core/bar_autohide";
@@ -189,13 +189,13 @@ function ToolsToggleButton() {
 function Logo() {
   return (
     <a
-      href="https://wiki.luckfox.com/intro/"
+      href="https://www.jetkvm.cn/"
       target="_blank"
       rel="noopener noreferrer"
       className="flex items-center gap-4 -ml-3"
     >
-      <img src={LogoLuckfox} alt="Luckfox Logo" className="h-[20px] dark:hidden" />
-      <img src={LogoLuckfox} alt="Luckfox Logo" className="hidden h-[20px] dark:block" />
+      <img src={LogoLuckfox} alt="JetKVM Logo" className="h-[20px] dark:hidden" />
+      <img src={LogoLuckfox} alt="JetKVM Logo" className="hidden h-[20px] dark:block" />
     </a>
   );
 }

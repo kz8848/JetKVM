@@ -240,7 +240,6 @@ var builtOtaPublicKey = ""
 
 var defaultConfig = &Config{
 	STUN:                 "stun:stun.l.google.com:19302",
-	AutoUpdateEnabled:    false, // Set a default value
 	TurnServers:              []TurnServer{},
 	ActiveExtension:          "",
 	KeyboardMacros:           []KeyboardMacro{},

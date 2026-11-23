@@ -17,7 +17,7 @@ import {
 import Container from "@components/Container";
 import { cx } from "@/cva.config";
 import { useJsonRpc } from "@/hooks/useJsonRpc";
-import LogoLuckfox from "@assets/logo-luckfox.png";
+import LogoLuckfox from "@assets/logo-blue.svg";
 import MacroTopBar from "@/layout/components_side/Macros/MacroTopBar";
 import { BarsPinButton } from "@/layout/core/bar_autohide";
 import { dark_bg2_style } from "@/layout/theme_color";
@@ -62,7 +62,7 @@ export default function TopBarPC({
         >
           <div className="relative flex flex-wrap items-center gap-y-2">
             <a
-              href="https://wiki.luckfox.com/intro/"
+              href="https://www.jetkvm.cn"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-4 -ml-3"

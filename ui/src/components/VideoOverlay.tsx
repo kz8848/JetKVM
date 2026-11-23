@@ -183,7 +183,7 @@ export function ConnectionFailedOverlay({
 
                     {isMobile && <div className="w-full h-[10px]"></div>}
                     <AntdButton
-                      href={"https://wiki.luckfox.com/intro"}
+                      href={"https://www.jetkvm.cn/"}
                       icon={<TiaoZhuanSvg />}
                       iconPosition={"end"}
                       onClick={() => setupPeerConnection()}
@@ -369,7 +369,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
                       {isMobile&&<div className="w-full h-[10px]"></div>}
 
                       <AntdButton
-                        href={"https://wiki.luckfox.com/intro"}
+                        href={"https://www.jetkvm.cn"}
                         iconPosition={"end"}
                         icon={<TiaoZhuanSvg />}
                         className={isMobile?"w-full !h-[40px]":"w-[49%]"}
@@ -415,7 +415,7 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
                     </div>
                     <div className={`flex  w-full justify-center ${isMobile ? "flex-col h-[40px]" : "flex-row"}`}>
                       <AntdButton
-                        href={"https://wiki.luckfox.com/intro"}
+                        href={"https://www.jetkvm.cn"}
                         icon={<TiaoZhuanSvg />}
                         iconPosition={"end"}
                         className={isMobile ? "w-full !h-[40px]" : "w-[49%]"}

@@ -1,7 +1,7 @@
 BRANCH    ?= Publish
 BUILDDATE ?= $(shell date -u +%FT%T%z)
 BUILDTS   ?= $(shell date -u +%s)
-REVISION  ?= e7b20db
+REVISION  ?= c8eada7
 VERSION_DEV ?= 0.1.5-dev
 VERSION ?= 0.1.5
 
